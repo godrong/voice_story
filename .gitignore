@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+*.egg-info/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual envs
+.venv/
+venv/
+env/
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Project data (ignore contents but keep the directory via .gitkeep)
+inputs/*
+datasets/*
+models/*
+books/*
+outputs/*
+!inputs/.gitkeep
+!datasets/.gitkeep
+!models/.gitkeep
+!books/.gitkeep
+!outputs/.gitkeep
+
+# Binary / heavy assets anywhere else
+*.wav
+*.mp3
+*.m4a
+*.m4b
+*.flac
+*.mp4
+*.mkv
+
+# Logs / experiments
+logs/
+runs/
+wandb/
+*.log
