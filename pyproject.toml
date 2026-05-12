@@ -16,10 +16,13 @@ dependencies = [
     "torch>=2.2",
     "torchaudio>=2.2",
 
-    # CLI / orchestration (ADK added once we wire it up)
+    # CLI / orchestration
     "typer>=0.12",
     "rich>=13.7",
     "pydantic>=2.7",
+
+    # Source plugins
+    "kagglehub>=0.3",
 ]
 
 [project.optional-dependencies]
@@ -28,8 +31,11 @@ preprocess = [
     "silero-vad>=5.0",
     "pyloudnorm>=0.1.1",
     "pypinyin>=0.50",
+    "pronouncing>=0.2.0",
+    "onnxruntime>=1.17",
 ]
 asr = [
+    "faster-whisper>=1.0",
     "funasr>=1.1",
     "modelscope>=1.17",
 ]
@@ -52,6 +58,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["agents", "core"]
+
+[project.scripts]
+voice-story = "cli:app"
 
 [tool.ruff]
 line-length = 100

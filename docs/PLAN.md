@@ -166,12 +166,148 @@ text ──► [AR backbone]  ──► semantic tokens / coarse acoustic tokens
 
 ## MVP 实施路径（建议顺序）
 
-0. **Day 0 - 项目骨架**：`git init` + 创建 `docs/PLAN.md`（同步本文件） + `docs/CHANGELOG.md` + `docs/ROADMAP.md` + 写入初始 5 份 ADR（ADR-0001~0005） + pyproject.toml + .gitignore（屏蔽 datasets/models/inputs/outputs/books）。首个 commit `chore: project scaffold (v0.0.1)`。
-1. **Week 1 - 数据管线**：实现 SourceAgent（本地文件版） + PreprocessAgent + DatasetAgent，目标是从一段本地音频文件跑出干净 dataset
+0. **Day 0 - 项目骨架** ✅（已完成，v0.0.1 tag）：`git init` + 创建 `docs/PLAN.md`（同步本文件） + `docs/CHANGELOG.md` + `docs/ROADMAP.md` + 写入初始 5 份 ADR（ADR-0001~0005） + pyproject.toml + .gitignore（屏蔽 datasets/models/inputs/outputs/books）。首个 commit `chore: project scaffold (v0.0.1)`。
+1. **Week 1 - 数据管线** 🚧（进行中，详见下方"Week 1 实施细节"）：实现 SourceAgent（本地 + Kaggle） + PreprocessAgent + DatasetAgent，目标是从一段任意来源音频跑出干净 dataset
 2. **Week 2 - MVP 合成**：接 CosyVoice 2 zero-shot，用 dataset 中的参考合成一段短文本，跑 speaker similarity 拿到 baseline 数字
 3. **Week 3 - 评估闭环**：搭 ADK evaluation，跑 baseline 指标
 4. **Week 4 - 朗读完整链路**：接入 SynthesisAgent + PostprocessAgent，合成一章短故事
 5. **后续迭代**：LoRA 微调 / AR+NonAR 架构升级 / 流式接口
+
+---
+
+## Week 1 实施细节（v0.1.0 数据管线）
+
+### 测试数据集
+
+```python
+import kagglehub
+path = kagglehub.dataset_download("etaifour/trump-speeches-audio-and-word-transcription")
+```
+
+- 英文长篇演讲音频 + word-level transcription
+- 该 transcription 用作 **ASR 准确性的 ground truth 验证**，不替代我们自己的 ASR pipeline（这样真正测出系统在 wild data 上的能力）
+
+### 本周新决策（来自本次澄清）
+
+1. **双语 ASR 后端**：Whisper-large-v3 (EN) + FunASR Paraformer-zh (ZH)，靠 Whisper langid 自动路由
+2. **Demucs 默认开启**：所有 source 一致走分离流程，保证 pipeline 一致性。Trump 等干净音频也走（可接受 5~10 分钟额外耗时）
+3. **新增 Kaggle source plugin**：扩展（不取代）ADR-0003，因为 kagglehub 是受控 API、无反爬/鉴权痛点
+
+待补 ADR：
+- **ADR-0006**：Kaggle 作为内置 source plugin（与 ADR-0003 关系：扩展而非 supersede）
+- **ADR-0007**：双语 ASR 后端策略
+- **ADR-0008**：Demucs 默认开启策略
+
+### 文件结构与开发顺序
+
+#### Day 1：通用音频转码 + 双源 SourceAgent
+
+新增：
+- [core/audio_io.py](core/audio_io.py) — ffmpeg-python wrapper
+  - `probe(path) -> dict` (format/duration/sample_rate/channels)
+  - `to_standard_wav(path, out_dir) -> Path`（统一 24kHz/16-bit/mono）
+  - `load(path) -> (np.ndarray, sr)`
+- [core/sources/__init__.py](core/sources/__init__.py) — `Source` Protocol：`fetch() -> Iterable[Path]`，附带 metadata（source_name/lang_hint/needs_separation）
+- [core/sources/local.py](core/sources/local.py) — 扫 `inputs/<name>/`
+- [core/sources/kaggle.py](core/sources/kaggle.py) — 包 `kagglehub.dataset_download`，递归找音频文件
+- [agents/source_agent.py](agents/source_agent.py) — dispatcher（source_type: `local` | `kaggle`），输出落 `datasets/<name>/raw/*.wav`
+
+#### Day 2：Demucs 人声分离
+
+新增：
+- [core/separation.py](core/separation.py) — Demucs v4 (htdemucs) wrapper
+  - 默认模型 `htdemucs`（非 _ft，省时）
+  - Mac MPS 加速；fallback CPU
+  - 输出 `datasets/<name>/vocals/*.wav`
+
+#### Day 3：VAD 切片
+
+新增：
+- [core/vad.py](core/vad.py) — Silero VAD
+  - `chunk(audio, sr, min_sec=3, max_sec=15) -> list[Chunk]`
+  - Chunk 边界尽量落在静音区（避免硬切单词）
+- 切片落 `datasets/<name>/chunks/*.wav`，同步 `chunks/index.jsonl` 记录 (chunk_id, source_file, start, end)
+
+#### Day 4：双语 ASR
+
+新增：
+- [core/asr.py](core/asr.py)
+  - `detect_language(audio) -> 'en'|'zh'`（faster-whisper 的 langid）
+  - 后端 `WhisperBackend`（faster-whisper large-v3, fallback medium 给低显存）+ `FunASRBackend`（Paraformer-zh + ct-punc 标点恢复）
+  - 输出：`{'text', 'confidence', 'word_timestamps', 'lang'}`
+- Trump 数据集额外步骤：解析自带 word-level transcription（Day 1 inspect 数据集格式后写 parser）→ 对比 Whisper 输出计 WER，作为质量基线
+
+#### Day 5：质量过滤 + 多样性采样 + manifest
+
+新增：
+- [core/eval.py](core/eval.py)（quality 子模块）
+  - `wada_snr(audio, sr) -> float`
+  - `dnsmos(audio, sr) -> dict{ovr, sig, bak}`（onnxruntime 推理）
+- [agents/dataset_agent.py](agents/dataset_agent.py)
+  - 过滤：MOS-OVR ≥ 3.5，SNR ≥ 15dB，无 clipping，confidence ≥ 0.85
+  - 多样性采样：
+    - 英文：CMU phoneme 覆盖（`pronouncing` 库）
+    - 中文：声韵母覆盖（`pypinyin`）
+    - 时长 / 能量 / 韵律分布
+  - 输出 `datasets/<name>/manifest.jsonl` + `datasets/<name>/report.md`
+
+#### Day 6：ADK 编排 + CLI
+
+新增：
+- [agents/preprocess_agent.py](agents/preprocess_agent.py) — Demucs → VAD 串联
+- [agents/root_agent.py](agents/root_agent.py) — `SequentialAgent(source → preprocess → dataset)`
+- [cli.py](cli.py)（typer）入口：
+  - `voice-story ingest --source kaggle --dataset-id <id> --name <speaker>`
+  - `voice-story ingest --source local --name <speaker>`
+  - `voice-story dataset stats --name <speaker>`（打印质量/覆盖率）
+
+#### Day 7：端到端跑通 + v0.1.0 发布
+
+- 用 Trump dataset 跑端到端，记录每步耗时
+- 验收指标（见下节）
+- 更新 `pyproject.toml` version `0.1.0`、`docs/CHANGELOG.md`、勾掉 `docs/ROADMAP.md` 对应项
+- 写 ADR-0006 / 0007 / 0008
+- commit + `git tag v0.1.0`
+
+### 依赖追加（pyproject.toml 增项）
+
+- `kagglehub`（新 extras `[sources]` 或并入 base）
+- `faster-whisper`（asr extras）
+- `pronouncing`（preprocess extras，英文音素）
+- 已规划：`funasr`, `modelscope`, `demucs`, `silero-vad`, `pyloudnorm`, `pypinyin`
+
+### 端到端验证
+
+```bash
+uv venv && source .venv/bin/activate
+uv pip install -e ".[preprocess,asr,adk,dev]"
+
+# Kaggle 鉴权：~/.kaggle/kaggle.json（或环境变量 KAGGLE_USERNAME/KAGGLE_KEY）
+voice-story ingest \
+  --source kaggle \
+  --dataset-id etaifour/trump-speeches-audio-and-word-transcription \
+  --name trump
+
+voice-story dataset stats --name trump
+```
+
+**验收（落入 docs/CHANGELOG.md 的 v0.1.0 条目）**：
+- `datasets/trump/manifest.jsonl` ≥ 200 行
+- 平均 DNSMOS-OVR > 3.5
+- ASR vs 数据集自带 transcription WER < 10%
+- phoneme 覆盖 > 80%
+- 任选 5 段 chunk 听感复检通过
+
+### 风险与缓解
+
+| 风险 | 缓解 |
+|---|---|
+| Kaggle API 鉴权（首次需配 token） | README 加一段 setup 指引；source 启动前 fail-fast 检查 |
+| Demucs 在 Mac 上慢（~3× 实时） | 用 `htdemucs` 而非 `htdemucs_ft`；MPS 加速；Trump 数据可先抽样跑 |
+| Whisper-large-v3 显存（~10GB） | 自动 fallback medium；记录回退到日志 |
+| FunASR 首次模型下载（~1.5GB） | 进度条 + 缓存到 `models/funasr/` |
+| 数据集 transcription 格式未知 | Day 1 先 inspect 数据集目录结构，把 parser 设计推后到 Day 4 |
+| Demucs 总开启对干净音频是浪费 | 接受；后续若性能瓶颈再加 `--skip-separation` flag（不在 Week 1 范围） |
 
 ---
 
