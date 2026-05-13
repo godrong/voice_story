@@ -7,10 +7,42 @@
 ## [Unreleased]
 
 ### Planned
-- SourceAgent (本地文件版)
-- PreprocessAgent: Demucs 人声分离 + Silero VAD + 说话人定位
-- DatasetAgent: FunASR 转写 + 质量过滤 + 多样性采样
-- CosyVoice 2 zero-shot 合成 demo
+- M2: CosyVoice 2 zero-shot 合成 + multi-reference selector
+- M3: ADK evaluation framework + speaker-sim / WER / MOS-pred 回归脚本
+
+## [0.1.0] - 2026-05-13
+
+### Added — M1 数据管线（Nodes A + B + C）
+- **core/audio_io.py**: ffmpeg 封装；`probe()` / `to_standard_wav()` / `load()` / `save()`，强制 24 kHz / 16-bit / mono
+- **core/sources/**: 插件化源采集层
+  - `Source` Protocol + `SourceMeta`（lang_hint / needs_separation / is_single_speaker / license）
+  - `LocalSource`：扫 `inputs/<name>/`
+  - `KaggleSource`：包装 `kagglehub.dataset_download`，鉴权 fail-fast
+- **core/separation.py**: Demucs v4 (htdemucs) 封装；MPS / CUDA 自动选；惰性加载、幂等
+- **core/vad.py**: Silero VAD + 贪心打包成 3~15s chunk；边界落静音区
+- **core/speaker.py**: WeSpeaker embedding + 余弦相似度过滤
+- **core/asr.py**: 双语 ASR——`Transcriber` 路由 Whisper-large-v3（EN，OOM 自动 fallback medium）/ FunASR Paraformer-zh（ZH，含 ct-punc 标点恢复）
+- **core/eval.py**: 质量评估——WADA-SNR + DNSMOS（ONNX，自动下载）+ 削波检测；统一接口 `score_chunk()`
+- **agents/state.py**: `PipelineState` + `ChunkInfo` / `TranscriptInfo` / `QualityScore` 三个 dataclass
+- **agents/source_agent.py**: dispatcher，接 Source 插件 → 标准化输出到 `datasets/<name>/raw/`
+- **agents/preprocess_agent.py**: 串联 Demucs → VAD → 可选 speaker filter
+- **agents/dataset_agent.py**: ASR → 质量过滤 → 多样性采样 → 输出 `manifest.jsonl` + `report.md`
+- **agents/root_agent.py**: 轻量 Stage Protocol + `build_m1_pipeline()` + `run_pipeline()`
+- **cli.py**: typer 入口；`voice-story ingest` + `voice-story dataset stats`
+- **tests/**: 19 个 unit test（audio_io / sources / dataset 纯函数），全部通过
+
+### Added — 文档
+- ADR-0006: Kaggle 作为内置 source（扩展 ADR-0003）
+- ADR-0007: 双语 ASR 后端策略（Whisper EN + FunASR ZH，langid 路由）
+- ADR-0008: Demucs 默认强制开启
+- docs/PLAN.html: 单文件 HTML 版项目规划（带导航、模块卡、状态 pill）
+
+### Changed
+- `pyproject.toml`: 加 `kagglehub` 进 base deps；extras `preprocess` 加 `pronouncing` + `onnxruntime`，`asr` 加 `faster-whisper`
+- `pyproject.toml`: 注册 `voice-story` 命令入口
+- 项目规划重构：去掉 week/day 排期，按"需求 → 架构 → 模块 → 里程碑"组织（M0~M7）
+
+Refs: PLAN#3.A, ADR-0006, ADR-0007, ADR-0008
 
 ## [0.0.1] - 2026-05-12
 
