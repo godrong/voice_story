@@ -134,14 +134,25 @@ class VAD:
             audio = librosa.resample(audio, orig_sr=sr, target_sr=audio_io.TARGET_SR)
             sr = audio_io.TARGET_SR
 
-        # Silero VAD wants a torch tensor and 16k or 8k internally; the
-        # library does its own resampling — we just hand it the float array.
-        # silero_vad 库内部自带重采样，给它原始波形即可。
+        # Silero VAD only accepts 8k or 16k (and multiples of 16k); our
+        # standard 24k WAV must be resampled to 16k just for the VAD call.
+        # We keep the original 24k audio for chunk slicing because chunk
+        # files stay in the standard 24k pipeline format. Timestamps come
+        # back in seconds, which is sample-rate independent.
+        # Silero VAD 仅支持 8k/16k（及其倍数），24k 标准音频要在 VAD 调用前
+        # 单独降采样到 16k；chunk 切片仍用原始 24k（pipeline 标准格式），
+        # 时间戳以秒为单位与采样率无关。
         import torch
+        import librosa
+        VAD_SR = 16000
+        if sr != VAD_SR:
+            vad_audio = librosa.resample(audio, orig_sr=sr, target_sr=VAD_SR)
+        else:
+            vad_audio = audio
         speech = get_speech_timestamps(
-            torch.from_numpy(audio),
+            torch.from_numpy(vad_audio),
             model,
-            sampling_rate=sr,
+            sampling_rate=VAD_SR,
             threshold=self.threshold,
             return_seconds=True,
         )

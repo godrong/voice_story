@@ -147,25 +147,21 @@ def _dnsmos_session():
     return ort.InferenceSession(str(model_path), sess_options=sess_options)
 
 
-def _audio_melspec(audio: np.ndarray, sr: int) -> np.ndarray:
-    """Mel-spectrogram preprocessing matching DNSMOS's training pipeline.
+def _prep_dnsmos_input(audio: np.ndarray, sr: int) -> np.ndarray:
+    """Prepare raw 16 kHz audio of fixed length for the DNSMOS ONNX model.
 
-    DNSMOS 训练管线对应的 mel-spectrogram 预处理步骤。
+    DNSMOS sig_bak_ovr.onnx 要求形状 (1, samples) 的 16 kHz 单声道 float32
+    波形；长度固定为 INPUT_LENGTH * 16000，短了 zero-pad，长了截断。
     """
     import librosa
     if sr != 16000:
         audio = librosa.resample(audio, orig_sr=sr, target_sr=16000)
-        sr = 16000
-    target_len = int(_DNSMOS_INPUT_LENGTH * sr)
+    target_len = int(_DNSMOS_INPUT_LENGTH * 16000)
     if audio.shape[0] < target_len:
         audio = np.pad(audio, (0, target_len - audio.shape[0]))
     else:
         audio = audio[:target_len]
-    mel = librosa.feature.melspectrogram(
-        y=audio, sr=sr, n_fft=320, hop_length=160, n_mels=120,
-    )
-    mel = (librosa.power_to_db(mel, ref=np.max) + 40) / 40
-    return mel.astype(np.float32)
+    return audio.astype(np.float32)[np.newaxis, :]  # (1, samples)
 
 
 def dnsmos(audio: np.ndarray, sr: int = audio_io.TARGET_SR) -> DnsmosScores:
@@ -182,11 +178,13 @@ def dnsmos(audio: np.ndarray, sr: int = audio_io.TARGET_SR) -> DnsmosScores:
         DnsmosScores 三个字段都在 [1, 5] 范围。
     """
     sess = _dnsmos_session()
-    feat = _audio_melspec(audio, sr)
-    feat = feat[np.newaxis, np.newaxis, :, :]  # (1, 1, mel, frames)
+    feat = _prep_dnsmos_input(audio, sr)
     inputs = {sess.get_inputs()[0].name: feat}
-    outputs = sess.run(None, inputs)[0][0]
-    sig, bak, ovr = float(outputs[0]), float(outputs[1]), float(outputs[2])
+    outputs = sess.run(None, inputs)
+    # Model returns three scalars in OVR/SIG/BAK order (per Microsoft P.835).
+    # 模型输出顺序为 SIG / BAK / OVR（按微软 P.835 文档）。
+    raw = outputs[0].squeeze()
+    sig, bak, ovr = float(raw[0]), float(raw[1]), float(raw[2])
     return DnsmosScores(ovr=ovr, sig=sig, bak=bak)
 
 
