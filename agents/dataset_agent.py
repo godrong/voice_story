@@ -58,12 +58,17 @@ logger = logging.getLogger(__name__)
 
 # ---- Filtering thresholds ------------------------------------------------
 #
-# These are conservative defaults from the v0.1.0 plan. Tuning happens
-# via flags in CLI, not by editing constants in code.
-# 默认过滤阈值；通过 CLI 标志调整，避免在代码里硬编辑常量。
+# Defaults calibrated against Demucs-cleaned audio (see ADR-0009).
+# WADA-SNR is recorded in the manifest as a diagnostic but no longer
+# gates inclusion — it gives garbage on Demucs vocal stems. DNSMOS-OVR
+# default lowered from 3.5 to 3.0 because Demucs leaves a slight
+# artifact that costs ~0.4 OVR.
+#
+# 默认阈值已按 Demucs 处理后的音频校准（详见 ADR-0009）。
+# WADA-SNR 不再用于过滤（在 vocal stem 上失真），只作为诊断数据写入 manifest。
+# DNSMOS-OVR 默认从 3.5 降到 3.0，对应 Demucs artifact 的 ~0.4 分扣分。
 
-DEFAULT_MIN_MOS_OVR = 3.5
-DEFAULT_MIN_SNR_DB = 15.0
+DEFAULT_MIN_MOS_OVR = 3.0
 DEFAULT_MIN_CONFIDENCE = 0.85
 
 
@@ -75,7 +80,6 @@ class FilterThresholds:
 
     Attributes:
         min_mos_ovr: Minimum DNSMOS OVR score. 最小 OVR。
-        min_snr_db: Minimum WADA-SNR in dB. 最小 SNR。
         min_confidence: Minimum ASR avg confidence (skipped when None).
             ASR 最小平均置信度（confidence 为 None 时跳过该项）。
         require_no_clipping: Drop chunks with detected clipping.
@@ -83,7 +87,6 @@ class FilterThresholds:
     """
 
     min_mos_ovr: float = DEFAULT_MIN_MOS_OVR
-    min_snr_db: float = DEFAULT_MIN_SNR_DB
     min_confidence: float = DEFAULT_MIN_CONFIDENCE
     require_no_clipping: bool = True
 
@@ -284,7 +287,7 @@ class DatasetAgent:
                 clipped=clipped,
             )
             # Filter
-            reason = self._filter_reason(tr, snr, mos, clipped)
+            reason = self._filter_reason(tr, mos, clipped)
             if reason is not None:
                 dropped[reason] += 1
                 logger.debug("DatasetAgent: drop %s (%s)", chunk.chunk_id, reason)
@@ -338,16 +341,19 @@ class DatasetAgent:
 
     def _filter_reason(
         self, tr: asr_mod.TranscriptResult,
-        snr: float, mos: eval_mod.DnsmosScores, clipped: bool,
+        mos: eval_mod.DnsmosScores, clipped: bool,
     ) -> str | None:
         """Return the drop reason for a chunk, or None if it passes.
 
         判断单 chunk 是否被过滤；返回原因字符串，None 表示通过。
+
+        SNR 不参与过滤（见 ADR-0009），仅记录到 manifest 用于诊断，
+        所以不在本函数签名里出现。
+        SNR is recorded for diagnostics but never gates here (ADR-0009),
+        so it's not in this function signature.
         """
         if self.thresholds.require_no_clipping and clipped:
             return "clipping"
-        if snr < self.thresholds.min_snr_db:
-            return "low_snr"
         if mos.ovr < self.thresholds.min_mos_ovr:
             return "low_mos"
         if (

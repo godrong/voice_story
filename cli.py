@@ -44,7 +44,6 @@ from rich.logging import RichHandler
 from agents.dataset_agent import (
     DEFAULT_MIN_CONFIDENCE,
     DEFAULT_MIN_MOS_OVR,
-    DEFAULT_MIN_SNR_DB,
     FilterThresholds,
     load_manifest,
 )
@@ -108,7 +107,6 @@ def ingest(
         False, help="Re-run even when outputs already exist.",
     ),
     min_mos: float = typer.Option(DEFAULT_MIN_MOS_OVR, help="Manifest MOS-OVR floor."),
-    min_snr: float = typer.Option(DEFAULT_MIN_SNR_DB, help="Manifest SNR floor (dB)."),
     min_conf: float = typer.Option(DEFAULT_MIN_CONFIDENCE, help="Manifest ASR confidence floor."),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
@@ -140,7 +138,7 @@ def ingest(
         raise typer.BadParameter(f"Unknown --source {source!r} (use 'local' or 'kaggle')")
 
     thresholds = FilterThresholds(
-        min_mos_ovr=min_mos, min_snr_db=min_snr, min_confidence=min_conf,
+        min_mos_ovr=min_mos, min_confidence=min_conf,
     )
     stages = build_m1_pipeline(
         source_type=source,

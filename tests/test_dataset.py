@@ -68,15 +68,15 @@ def test_phoneme_universe_sizes():
 
 
 def test_filter_thresholds_defaults():
-    """FilterThresholds defaults match the v0.1 plan numbers.
+    """FilterThresholds defaults reflect ADR-0009 (post-Demucs calibration).
 
-    默认门槛值与 v0.1 规划一致。
+    默认门槛值反映 ADR-0009：去掉 SNR、MOS 降到 3.0。
     """
     t = da.FilterThresholds()
-    assert t.min_mos_ovr == 3.5
-    assert t.min_snr_db == 15.0
+    assert t.min_mos_ovr == 3.0
     assert t.min_confidence == 0.85
     assert t.require_no_clipping is True
+    assert not hasattr(t, "min_snr_db"), "min_snr_db should be removed (ADR-0009)"
 
 
 def test_render_report_includes_key_sections():

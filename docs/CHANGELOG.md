@@ -10,6 +10,28 @@
 - M2: CosyVoice 2 zero-shot 合成 + multi-reference selector
 - M3: ADK evaluation framework + speaker-sim / WER / MOS-pred 回归脚本
 
+## [0.1.1] - 2026-05-13
+
+### Fixed
+- `core/vad.py`: Silero VAD 仅支持 8k/16k 采样率，pipeline 标准音频 24k 之前会报 `ValueError`。在 VAD 调用前 resample 到 16k；chunk 切片仍用 24k 原始数据
+- `core/eval.py`: DNSMOS sig_bak_ovr.onnx 期望 raw waveform `(1, samples)` 输入，原代码喂的是 mel-spectrogram `(1, 1, mel, frames)` 直接报 `InvalidArgument: rank 4 vs 2`。改为 9.01s @ 16k zero-pad / 截断的 raw waveform
+
+### Changed
+- 质量过滤阈值按 Demucs 后音频校准（ADR-0009）：
+  - **WADA-SNR 退出过滤**，只作为 manifest 诊断字段（在 vocal stem 上失真）
+  - `DEFAULT_MIN_MOS_OVR` 从 `3.5` 降到 `3.0`（Demucs artifact 系统扣 ~0.4 分）
+  - `FilterThresholds.min_snr_db` 字段删除；`cli.py` 删除 `--min-snr` 标志
+- `tests/test_dataset.py::test_filter_thresholds_defaults` 同步更新
+
+### Added
+- ADR-0009: 质量阈值按 Demucs 后音频校准
+
+### Smoke run（30s Trump WEF 2018）
+- 5 chunks，3 通过 / 2 因 low_mos 丢（OVR 2.92 / 2.94 < 3.0）
+- 通过 chunks 平均 OVR 3.25，phoneme 覆盖 92.3%，Whisper confidence 平均 0.97
+
+Refs: ADR-0009
+
 ## [0.1.0] - 2026-05-13
 
 ### Added — M1 数据管线（Nodes A + B + C）
