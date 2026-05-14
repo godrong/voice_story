@@ -1,0 +1,114 @@
+# =============================================================================
+# Experiment 002 — Reference selection + instruct-prompt A/B
+#
+# 你能编辑的 4 个区段（按推荐编辑频率排序）：
+#   1. target_texts   — 想合成什么文本（每条 = 一组对比）
+#   2. matrix         — 实际要跑的 (target × ref × instruct) 组合，注释行可跳过
+#   3. instruct_prompts — 想测试的风格指令（自然语言；CosyVoice 2 instruct 模式）
+#   4. references     — 参考音频候选；不变的话不用动
+#
+# 改完后跑：
+#   conda run -n ai_study python experiments/exp_002_ref_and_instruct/runner.py
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 1. TARGET TEXTS — 想合成的文本
+# -----------------------------------------------------------------------------
+# 每个 entry 一个测试目标。id 用作输出 wav 的文件名前缀。
+# 加新 entry 直接复制粘贴一段、改 id + text。Trump 风格短句通常最容易听出差异。
+# -----------------------------------------------------------------------------
+
+target_texts:
+  # - id: t1_basic_test
+    # text: "Hello world. This is a test of voice cloning using CosyVoice 2 zero shot. The quick brown fox jumps over the lazy dog."
+
+  # ↓ 这两条是预制的"Trump 风格"句子，可注释/解开试
+  # - id: t2_trump_style
+    # text: "We are going to make voice cloning great again, believe me. Nobody does it better. It's tremendous, just tremendous."
+
+  - id: t3_wangrong
+    text: "It’s great to be back in Beijing, truly fantastic. But I have to say, I’m very disappointed that Wang Rong couldn’t join us. I invited him, but he turned me down because he’s in Singapore doing incredible things with AI. He’s smart, a real professional! But Wang, listen—this isn't over. I’m going to bring him on board to start a company with me. We’re going to build something huge, the biggest ever!"
+
+  # - id: t4_your_text_here
+  #   text: "在这里写你想测试的任何文本。"
+
+
+# -----------------------------------------------------------------------------
+# 2. MATRIX — 实际要跑的组合
+# -----------------------------------------------------------------------------
+# 每行 [target_id, ref_id, instruct_id]。一行一个合成任务。
+# 注释掉某行就跳过该组合（节省时间）。
+# -----------------------------------------------------------------------------
+
+matrix:
+  # baseline: 当前 smoke 的配置（calm ref + 无指令）
+  - [t3_wangrong, r0_baseline_calm,         none]
+
+  # 实验 1：换更有起伏的 ref，仍走 zero_shot 无指令
+  - [t3_wangrong, r1_emphatic_businessman,  none]
+  - [t3_wangrong, r2_emphatic_country,      none]
+
+  # 实验 2：emphatic ref + instruct 指令
+  # en_emphatic 含 "dramatic pauses"，对长篇 Trump 风格演讲尤其合适
+  - [t3_wangrong, r1_emphatic_businessman,  en_rising]
+  - [t3_wangrong, r1_emphatic_businessman,  en_emphatic]
+  - [t3_wangrong, r1_emphatic_businessman,  zh_rising]
+
+
+# -----------------------------------------------------------------------------
+# 3. INSTRUCT PROMPTS — 风格指令
+# -----------------------------------------------------------------------------
+# id 'none' 表示走 zero_shot 模式（不发指令）。其它的 text 末尾必须含
+# "<|endofprompt|>"，runner 会自动补，所以你写不写都行。
+# 加新指令：复制一段、改 id + text，再到 matrix 加引用。
+# -----------------------------------------------------------------------------
+
+instruct_prompts:
+  - id: none
+    text: null   # = zero_shot mode
+
+  - id: en_rising
+    text: "Speak with rising intonation at sentence endings, in an emphatic political-speech style."
+
+  - id: en_emphatic
+    text: "Speak in the style of a confident American politician, with strong emphasis, dramatic pauses, and slight rising tone at sentence endings."
+
+  - id: zh_rising
+    text: "以特朗普演讲的节奏说，每个陈述句结尾稍微上扬，带强调感。"
+
+  # - id: en_calm
+  #   text: "Speak slowly and calmly, like reading a bedtime story to a child."
+
+
+# -----------------------------------------------------------------------------
+# 4. REFERENCES — 参考音频候选
+# -----------------------------------------------------------------------------
+# 已经按 pitch_std (音高变化丰富度) 挑好的 Trump 候选 + baseline。
+# audio 路径相对项目根；prompt_text 必须严格是 ref 中说的话（CosyVoice 2 zero_shot 要求）。
+# 想加新候选：先跑 `python -c "..."` 看 manifest 找新 chunk_id，再粘贴一行。
+# -----------------------------------------------------------------------------
+
+references:
+  # 当前 smoke 用的 calm 开场白（pitch_std≈27, 平稳）
+  - id: r0_baseline_calm
+    chunk_id: trump_30s__00000000_00010000
+    audio: datasets/trump_smoke/chunks/trump_30s__00000000_00010000.wav
+    prompt_text: "Thank you, Klaus, very much. It's a privilege to be here at this forum where leaders in business, science, art, diplomacy, and world affairs have gathered for..."
+
+  # pitch_std=42.2 — 最有起伏，"我作为商人"段，叙述性强调
+  - id: r1_emphatic_businessman
+    chunk_id: Trump_WEF_2018__01467300_01474500
+    audio: datasets/trump_wef/chunks/Trump_WEF_2018__01467300_01474500.wav
+    prompt_text: "And as a businessman, I was always treated really well by the press. You know, the numbers speak and things happen. But I've always really had a very good press."
+
+  # pitch_std=37.5 — "也应当把自己国家放第一"段，典型 Trump 强调句
+  - id: r2_emphatic_country
+    chunk_id: Trump_WEF_2018__00324300_00331400
+    audio: datasets/trump_wef/chunks/Trump_WEF_2018__00324300_00331400.wav
+    prompt_text: "just like the leaders of other countries, should put their country first also."
+
+  # pitch_std=33.4 — "更多监管"段，节奏多变带列举
+  - id: r3_emphatic_regulations
+    chunk_id: Trump_WEF_2018__01541100_01552100
+    audio: datasets/trump_wef/chunks/Trump_WEF_2018__01541100_01552100.wav
+    prompt_text: "We've got more regulations in one year. And we have a ways to go. I mean, we're probably 50 percent done. And we're going to have regulation. There's nothing wrong with rules and regulations. You need them."

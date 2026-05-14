@@ -78,6 +78,8 @@ class TTSBackend(Protocol):
         prompt_text: str = "",
         instruct: str | None = None,
         mode: str = "zero_shot",
+        normalize: bool = True,
+        lang: str = "en",
     ) -> Path: ...
 
     def close(self) -> None: ...
@@ -233,6 +235,8 @@ class LocalSubprocessTTS:
         prompt_text: str = "",
         instruct: str | None = None,
         mode: str = "zero_shot",
+        normalize: bool = True,
+        lang: str = "en",
     ) -> Path:
         """Send one synthesis task and block until the worker responds.
 
@@ -245,6 +249,9 @@ class LocalSubprocessTTS:
             prompt_text: zero_shot 模式下参考音频对应的文本（必填）。
             instruct: instruct 模式下的风格指令（可加 <|endofprompt|> 后缀）。
             mode: "zero_shot" / "cross_lingual" / "instruct"。
+            normalize: 默认 True；过 core.text_norm 把 unicode 标点 ASCII 化、
+                英文缩写展开（he's → he is）。设 False 走原始文本（实验用）。
+            lang: 文本语种 ("en" / "zh")，决定缩写展开是否启用。
 
         Returns:
             输出 WAV 的 Path。
@@ -258,6 +265,17 @@ class LocalSubprocessTTS:
             raise TTSWorkerCrashed(
                 f"worker already exited with code {self._proc.returncode}"
             )
+
+        if normalize:
+            # Normalize both target and prompt; the latter must match the ref
+            # audio's actual phonemes and CosyVoice handles ASCII apostrophes
+            # better than smart quotes.
+            # 目标文本与 prompt_text 都规范化；prompt 必须和 ref 实际发音
+            # 对应，CosyVoice 处理 ASCII 撇号比弯引号更稳。
+            from . import text_norm
+            text = text_norm.normalize_for_tts(text, lang=lang)
+            if prompt_text:
+                prompt_text = text_norm.normalize_for_tts(prompt_text, lang=lang)
 
         self._task_counter += 1
         task = {

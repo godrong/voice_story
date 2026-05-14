@@ -11,6 +11,48 @@
 - M2 续: synthesis_agent (book sentence → TTS 串联)
 - M3: ADK evaluation framework + speaker-sim / WER / MOS-pred 回归脚本
 
+## [0.1.4] - 2026-05-14
+
+### Added — TTS 文本规范化（B 层，朗读专用）
+- **core/text_norm.py**: 朗读前的文本清洗模块
+  - Unicode pass: 弯引号 ('"') → ASCII，em/en 破折号 → '-'，省略号 (…) → "..."，
+    零宽字符 / NBSP / BOM 删除，多空白合并
+  - 英文缩写展开: `he's → he is` / `couldn't → could not` 等约 30 条；
+    优先用 `contractions` 库（已装 ai_study），缺失时退到内置 fallback 表
+  - `normalize_for_tts(text, lang="en"|"zh")` 一站式入口
+  - 中文路径只跑 unicode 步（中文无英文式缩写）
+
+### Changed
+- **core/tts.py**: `LocalSubprocessTTS.synthesize()` 与 `TTSBackend` Protocol
+  新增 `normalize=True`（默认）+ `lang="en"`（默认）两个 kwarg；
+  text 与 prompt_text 都自动过 `normalize_for_tts`。
+  设 `normalize=False` 走原始文本（用于实验对比 / 测试模型原生处理力）
+
+### Why
+- exp 002 round 2 听感反馈：CosyVoice 2 英文缩写处理（`he's` / `couldn't`）
+  G2P 对但韵律生硬。展开成完整形式让模型多一个音节做韵律布置，发音更自然
+- Trump 的 wangrong 测试文本含弯引号与 em-dash，TTS 模型对 unicode 标点
+  G2P 偶发出错，统一 ASCII 化避免
+
+### 不做（明确限定）
+- 拼写纠错（漏字 typo 仍然原样朗读，由用户上游修）
+- 数字 / 日期 / 缩略语展开（CosyVoice 2 frontend 自带，未崩前不补）
+- 风格改写（C 层，会改语义，由 ADR-0010 的 style_agent 处理）
+
+### Tests
+- **tests/test_text_norm.py**: 16 个单测覆盖 unicode 各类替换、缩写展开
+  （库 + 兜底两条路径）、语种路由、空输入、纯 ASCII 无操作等场景
+- 所有 24 测试通过（16 text_norm + 8 既有 tts，无回归）
+
+### Demo（用户的 wangrong 文本）
+```
+BEFORE: It's great to be back...I'm very disappointed that Wang Rong couldn't join us
+AFTER:  It is great to be back...I am very disappointed that Wang Rong could not join us
+```
+9 处缩写展开 + 弯引号 / em-dash → ASCII。
+
+Refs: PLAN#3.B.1
+
 ## [0.1.3] - 2026-05-14
 
 ### Added — M2 TTS 基础设施（zero-shot 第一次合成跑通）
