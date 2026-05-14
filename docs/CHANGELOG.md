@@ -10,6 +10,25 @@
 - M2: CosyVoice 2 zero-shot 合成 + multi-reference selector
 - M3: ADK evaluation framework + speaker-sim / WER / MOS-pred 回归脚本
 
+## [0.1.2] - 2026-05-14
+
+### Added — Manifest schema v1.1（M2 风格控制基线）
+- **core/prosody.py**: 新模块，按 chunk 算 F0（librosa.pyin）/ LUFS（pyloudnorm）/ RMS / speech_ratio / pace / emotion2vec_plus_base top-1 标签。emotion 模型惰性加载，约 500MB
+- **agents/state.py**: 新增 `ProsodyScore` dataclass，挂在 `PipelineState.prosody` 上
+- **agents/dataset_agent.py**: manifest 升到 v1.1
+  - 新字段（T1）：`manifest_version` / `start_sec` / `end_sec` / `duration_bucket` / `energy_bucket`（自适应） / `prosody_label` / `clipped` / `prev_chunk_id` / `next_chunk_id` / `text_hash` / `speaker_id`
+  - 新字段（T2）：`emotion_tag` / `emotion_confidence` / `pitch_mean_hz` / `pitch_std_hz` / `energy_rms` / `loudness_lufs` / `speech_ratio` / `pace_units_per_sec`
+  - 流水线改两遍：pass 1 算 raw 特征，pass 2 用 RMS 33/66 分位给 `energy_bucket` 自适应分桶（见 ADR-0011）
+  - NaN / ±inf 序列化前归一到 `null`，保持 manifest JSON 合法
+  - `report.md` 加 emotion 分布 + 当前 ingest 的 p33 / p66 阈值
+- **agents/dataset_agent.py**: `_build_neighbor_index` 在同一 `source_file` 内按起点排序，O(1) 查 prev/next chunk id
+
+### Added — 文档
+- **ADR-0010**: 风格控制 — global profile + LLM 句级标注 + instruct prompt
+- **ADR-0011**: Energy bucket 自适应分位数（取代固定阈值）
+
+Refs: ADR-0010, ADR-0011, PLAN#3.A.8
+
 ## [0.1.1] - 2026-05-13
 
 ### Fixed

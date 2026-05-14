@@ -87,6 +87,49 @@ class QualityScore:
 
 
 @dataclass
+class ProsodyScore:
+    """Per-chunk prosody + emotion features (manifest v1.1, T2).
+
+    单 chunk 的韵律 + 情绪特征束（manifest v1.1 的 T2 字段）。
+
+    Style / reference selection (ADR-0010) reads these fields to match
+    target sentences against dataset chunks. Distinct from QualityScore
+    which gates training inclusion.
+
+    风格控制 / reference 选择（ADR-0010）依据这些字段把目标句匹配到
+    dataset chunk。与 QualityScore 不同 —— QualityScore 决定能不能
+    进训练集，ProsodyScore 决定"听起来怎么样"。
+
+    Attributes:
+        chunk_id: References ChunkInfo.chunk_id. 关联 ChunkInfo。
+        pitch_mean_hz: Mean F0 in Hz over voiced frames; NaN if unvoiced.
+            voiced 帧的 F0 均值；全段 unvoiced 时为 NaN。
+        pitch_std_hz: Std-dev of F0 in Hz. F0 标准差。
+        energy_rms: Whole-chunk RMS in [0, 1]. 整段 RMS。
+        loudness_lufs: Integrated loudness (ITU-R BS.1770).
+            综合响度（LUFS）。
+        speech_ratio: Fraction of frames above per-chunk RMS threshold.
+            高于 chunk 内 RMS 阈值的帧占比。
+        pace_units_per_sec: Characters/sec (ZH) or syllables/sec (EN).
+            中文按字 / 英文按音节的语速。
+        emotion_tag: Normalized top-1 emotion label from emotion2vec.
+            emotion2vec 归一后的 top-1 情绪标签。
+        emotion_confidence: Top-1 probability in [0, 1].
+            top-1 概率。
+    """
+
+    chunk_id: str
+    pitch_mean_hz: float
+    pitch_std_hz: float
+    energy_rms: float
+    loudness_lufs: float
+    speech_ratio: float
+    pace_units_per_sec: float
+    emotion_tag: str
+    emotion_confidence: float
+
+
+@dataclass
 class PipelineState:
     """End-to-end state passed through every stage of the data pipeline.
 
@@ -107,6 +150,8 @@ class PipelineState:
                      ASR 结果，按 chunk_id 索引。
         quality: Quality scores keyed by chunk_id.
                  质量评分，按 chunk_id 索引。
+        prosody: Prosody / emotion features keyed by chunk_id (manifest v1.1).
+                 韵律 / 情绪特征，按 chunk_id 索引（manifest v1.1）。
         manifest_path: Final manifest.jsonl produced by DatasetAgent.
                        DatasetAgent 产出的最终 manifest 路径。
     """
@@ -118,6 +163,7 @@ class PipelineState:
     chunks: list[ChunkInfo] = field(default_factory=list)
     transcripts: dict[str, TranscriptInfo] = field(default_factory=dict)
     quality: dict[str, QualityScore] = field(default_factory=dict)
+    prosody: dict[str, ProsodyScore] = field(default_factory=dict)
     manifest_path: Path | None = None
 
     def ensure_dirs(self) -> None:

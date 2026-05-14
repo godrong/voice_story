@@ -38,8 +38,10 @@ based on diversity tags later.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import math
 import re
 from collections import Counter
 from collections.abc import Iterable
@@ -49,9 +51,10 @@ from pathlib import Path
 import numpy as np
 
 from core import asr as asr_mod
-from core import audio_io, eval as eval_mod
+from core import eval as eval_mod
+from core import prosody as prosody_mod
 
-from .state import PipelineState, QualityScore, TranscriptInfo
+from .state import PipelineState, ProsodyScore, QualityScore, TranscriptInfo
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +73,17 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MIN_MOS_OVR = 3.0
 DEFAULT_MIN_CONFIDENCE = 0.85
+
+# Manifest schema version. Bump on any field add/rename/remove so that
+# downstream consumers can reject unknown shapes.
+# manifest 字段结构版本号；每次新增 / 改名 / 删字段都要 bump，
+# 下游消费方据此识别。
+MANIFEST_VERSION = "1.1"
+
+# Default speaker tag for single-speaker sources. Multi-speaker future
+# work overrides this in state-level metadata.
+# 单说话人源的默认 speaker_id；多说话人扩展后由 source/state 覆写。
+DEFAULT_SPEAKER_ID = "main"
 
 
 @dataclass
@@ -103,17 +117,40 @@ def _bucket_duration(sec: float) -> str:
     return "long"
 
 
-def _bucket_energy(audio: np.ndarray) -> str:
-    """Categorize chunk energy by RMS percentile against a fixed grid.
+def _bucket_energy_adaptive(rms: float, p33: float, p66: float) -> str:
+    """Categorize chunk energy by adaptive (per-ingest) RMS terciles.
 
-    基于 RMS 能量分到 quiet/normal/loud 三档，固定分位数避免按数据集漂移。
+    按本次 ingest 的 RMS 33/66 分位把 chunk 分到 quiet/normal/loud 三档。
+
+    Why adaptive: post-Demucs RMS 范围因 source / 麦克风 / 演讲风格 而异，
+    固定阈值会在某些 corpus 上把所有 chunk 都塞进同一档（ADR-0011）。
+    Raw `energy_rms` field 仍写入 manifest，下游需要绝对值时直接用。
+    Why adaptive: post-Demucs RMS scale varies by source/mic/style, so a
+    fixed threshold collapses entire corpora into one bucket (ADR-0011).
+    The raw energy_rms value is still in the manifest for any downstream
+    that needs the absolute number.
+
+    Args:
+        rms: Per-chunk RMS in [0, 1].
+        p33: 33rd-percentile RMS across the current ingest.
+        p66: 66th-percentile RMS across the current ingest.
+
+    Returns:
+        One of "quiet" / "normal" / "loud".
     """
-    rms = float(np.sqrt(np.mean(audio.astype(np.float32) ** 2)) + 1e-10)
-    if rms < 0.05:
+    if rms < p33:
         return "quiet"
-    if rms < 0.15:
+    if rms < p66:
         return "normal"
     return "loud"
+
+
+def _rms(audio: np.ndarray) -> float:
+    """Compute the RMS of a 1-D float audio array.
+
+    计算单声道 float 音频的 RMS（带极小 epsilon 防零）。
+    """
+    return float(np.sqrt(np.mean(audio.astype(np.float32) ** 2)) + 1e-10)
 
 
 def _prosody_label(text: str) -> str:
@@ -131,6 +168,35 @@ def _prosody_label(text: str) -> str:
     if last in {"!", "！"}:
         return "exclamation"
     return "declarative"
+
+
+def _text_hash(text: str) -> str:
+    """Stable short hash of normalized text for near-duplicate detection.
+
+    返回标准化文本的稳定短哈希，用于近似重复检测。
+
+    Normalization: lowercase + collapse whitespace + strip surrounding
+    punctuation. Hash is first 16 hex chars of SHA-1 (16^16 ≈ 1.8e19
+    keyspace, ample for dataset-scale dedup).
+
+    标准化：小写 + 折叠空白 + 去首尾标点。哈希取 SHA-1 前 16 hex 字符
+    （键空间约 1.8e19，dataset 量级去重足够）。
+    """
+    normalized = re.sub(r"\s+", " ", text.strip().lower())
+    normalized = normalized.strip(".,!?；。，！？\"'“”‘’")
+    return hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:16]
+
+
+def _safe_float(value: float) -> float | None:
+    """Coerce NaN / +-inf to None so the manifest JSON stays valid.
+
+    把 NaN / ±inf 转成 None，保证 manifest JSON 合法（json 不支持这些值）。
+    """
+    if value is None:
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return float(value)
 
 
 def _phonemes(text: str, lang: str) -> set[str]:
@@ -263,15 +329,27 @@ class DatasetAgent:
             self._transcriber = asr_mod.Transcriber(lang_hint=lang_hint)
         transcriber = self._ensure_transcriber()
 
+        # Precompute neighbor chunk ids within each source_file so we
+        # can link sentences for cross-sentence prosody. Built once up
+        # front so the per-chunk loop can do O(1) lookups.
+        # 预先按 source_file 排序 chunk，记录每个 chunk 的前后邻居 id；
+        # 主循环只做 O(1) 查表。同源邻居用于跨句韵律 / 上下文 prompt。
+        neighbors = self._build_neighbor_index(state.chunks)
+
         rows: list[dict] = []
         kept = 0
         dropped: Counter[str] = Counter()
         seen_phonemes: set[str] = set()
         bucket_dur: Counter[str] = Counter()
-        bucket_energy: Counter[str] = Counter()
         bucket_prosody: Counter[str] = Counter()
         lang_tally: Counter[str] = Counter()
+        emotion_tally: Counter[str] = Counter()
 
+        # Pass 1: ASR / quality / prosody for every chunk; bucket labels
+        # that depend on corpus-wide percentiles (energy_bucket) are
+        # filled in pass 2 once we know p33/p66.
+        # 第一遍：转写、质量、韵律。依赖 corpus 分位的 energy_bucket
+        # 留到第二遍补上。
         for chunk in state.chunks:
             # ASR
             tr = transcriber.transcribe(chunk.path)
@@ -293,29 +371,95 @@ class DatasetAgent:
                 logger.debug("DatasetAgent: drop %s (%s)", chunk.chunk_id, reason)
                 continue
 
-            # Diversity bookkeeping
-            audio, _ = audio_io.load(chunk.path)
+            # T1 derived: duration / prosody (cheap, single-chunk)
+            # T1 派生：时长 / 韵律标签（单 chunk 即可，零跨样本依赖）
             dur = chunk.end_sec - chunk.start_sec
-            bucket_dur[_bucket_duration(dur)] += 1
-            bucket_energy[_bucket_energy(audio)] += 1
-            bucket_prosody[_prosody_label(tr.text)] += 1
+            dur_bucket = _bucket_duration(dur)
+            prosody_label = _prosody_label(tr.text)
+
+            bucket_dur[dur_bucket] += 1
+            bucket_prosody[prosody_label] += 1
             seen_phonemes |= _phonemes(tr.text, tr.lang)
             lang_tally[tr.lang] += 1
 
+            # T2: prosody + emotion. emotion2vec lazy-loads its model on
+            # the first call; subsequent chunks reuse the cached session.
+            # T2：韵律 + 情绪。emotion2vec 首次调用惰性加载，后续 chunk 复用缓存。
+            pf = prosody_mod.score_prosody(chunk.path, text=tr.text, lang=tr.lang)
+            state.prosody[chunk.chunk_id] = ProsodyScore(
+                chunk_id=chunk.chunk_id,
+                pitch_mean_hz=pf.pitch_mean_hz,
+                pitch_std_hz=pf.pitch_std_hz,
+                energy_rms=pf.energy_rms,
+                loudness_lufs=pf.loudness_lufs,
+                speech_ratio=pf.speech_ratio,
+                pace_units_per_sec=pf.pace_units_per_sec,
+                emotion_tag=pf.emotion_tag,
+                emotion_confidence=pf.emotion_confidence,
+            )
+            emotion_tally[pf.emotion_tag] += 1
+
+            prev_id, next_id = neighbors.get(chunk.chunk_id, (None, None))
+
             rows.append({
+                # Schema / housekeeping
+                "manifest_version": MANIFEST_VERSION,
+                # Identity
                 "chunk_id": chunk.chunk_id,
                 "audio_path": str(chunk.path),
                 "source_file": str(chunk.source_file),
+                "speaker_id": DEFAULT_SPEAKER_ID,
+                "prev_chunk_id": prev_id,
+                "next_chunk_id": next_id,
+                # Text
                 "text": tr.text,
+                "text_hash": _text_hash(tr.text),
                 "lang": tr.lang,
                 "confidence": tr.confidence,
+                # Timing
+                "start_sec": chunk.start_sec,
+                "end_sec": chunk.end_sec,
                 "duration": dur,
+                "duration_bucket": dur_bucket,
+                # Quality (existing)
                 "snr_db": snr,
                 "mos_ovr": mos.ovr,
                 "mos_sig": mos.sig,
                 "mos_bak": mos.bak,
+                "clipped": clipped,
+                # T1 prosody buckets (energy_bucket filled in pass 2 below)
+                "energy_bucket": None,
+                "prosody_label": prosody_label,
+                # T2 prosody / emotion
+                "energy_rms": _safe_float(pf.energy_rms),
+                "loudness_lufs": _safe_float(pf.loudness_lufs),
+                "speech_ratio": _safe_float(pf.speech_ratio),
+                "pitch_mean_hz": _safe_float(pf.pitch_mean_hz),
+                "pitch_std_hz": _safe_float(pf.pitch_std_hz),
+                "pace_units_per_sec": _safe_float(pf.pace_units_per_sec),
+                "emotion_tag": pf.emotion_tag,
+                "emotion_confidence": _safe_float(pf.emotion_confidence),
             })
             kept += 1
+
+        # Pass 2: derive corpus-wide RMS terciles from this ingest's
+        # surviving chunks, then assign energy_bucket per row. Adaptive
+        # rather than fixed thresholds, see ADR-0011.
+        # 第二遍：基于本次 ingest 的存活 chunk RMS 算 33/66 分位，
+        # 给每行补 energy_bucket。自适应而非硬阈值，见 ADR-0011。
+        rms_values = [r["energy_rms"] for r in rows if r["energy_rms"] is not None]
+        if rms_values:
+            arr = np.asarray(rms_values, dtype=np.float64)
+            p33 = float(np.percentile(arr, 33))
+            p66 = float(np.percentile(arr, 66))
+        else:
+            p33 = p66 = 0.0
+        bucket_energy: Counter[str] = Counter()
+        for row in rows:
+            rms = row["energy_rms"]
+            label = _bucket_energy_adaptive(rms, p33, p66) if rms is not None else "unknown"
+            row["energy_bucket"] = label
+            bucket_energy[label] += 1
 
         # Write manifest + report
         manifest_path = state.dataset_root / "manifest.jsonl"
@@ -330,6 +474,8 @@ class DatasetAgent:
             dropped=dropped, lang_tally=lang_tally,
             bucket_dur=bucket_dur, bucket_energy=bucket_energy,
             bucket_prosody=bucket_prosody, seen_phonemes=seen_phonemes,
+            emotion_tally=emotion_tally,
+            energy_p33=p33, energy_p66=p66,
         )
         report_path.write_text(report, encoding="utf-8")
 
@@ -338,6 +484,35 @@ class DatasetAgent:
             kept, len(state.chunks), dict(dropped), manifest_path,
         )
         return state
+
+    @staticmethod
+    def _build_neighbor_index(
+        chunks: list,
+    ) -> dict[str, tuple[str | None, str | None]]:
+        """Map chunk_id → (prev_chunk_id, next_chunk_id) within source_file.
+
+        在同一 source_file 内按起点排序，给每个 chunk 计算前后邻居 id。
+        跨 source_file 不连接（不同录音的"邻居"对韵律没意义）。
+
+        Args:
+            chunks: List[ChunkInfo].
+
+        Returns:
+            dict mapping chunk_id to (prev_id, next_id); endpoints get
+            None on the missing side.
+            chunk_id → (前邻 id, 后邻 id) 的字典；端点一侧用 None。
+        """
+        by_source: dict[Path, list] = {}
+        for c in chunks:
+            by_source.setdefault(c.source_file, []).append(c)
+        index: dict[str, tuple[str | None, str | None]] = {}
+        for group in by_source.values():
+            group.sort(key=lambda c: c.start_sec)
+            for i, c in enumerate(group):
+                prev_id = group[i - 1].chunk_id if i > 0 else None
+                next_id = group[i + 1].chunk_id if i < len(group) - 1 else None
+                index[c.chunk_id] = (prev_id, next_id)
+        return index
 
     def _filter_reason(
         self, tr: asr_mod.TranscriptResult,
@@ -370,10 +545,12 @@ class DatasetAgent:
         dropped: Counter[str], lang_tally: Counter[str],
         bucket_dur: Counter[str], bucket_energy: Counter[str],
         bucket_prosody: Counter[str], seen_phonemes: set[str],
+        emotion_tally: Counter[str],
+        energy_p33: float = 0.0, energy_p66: float = 0.0,
     ) -> str:
         """Render the human-readable report.md content.
 
-        渲染 report.md 内容（含质量统计 + 多样性 + 音素覆盖率）。
+        渲染 report.md 内容（含质量统计 + 多样性 + 音素覆盖率 + 情绪分布）。
         """
         # Compute coverage per language seen.
         # 按检测到的语种分别算音素覆盖率。
@@ -386,8 +563,16 @@ class DatasetAgent:
                 f"  - {lang}: {len(covered)}/{len(uni)} = {ratio * 100:.1f}%"
             )
 
+        # Emotion lines: report all labels seen, sorted by frequency.
+        # 情绪行：列出所有出现过的标签，按频率降序。
+        emotion_lines = [
+            f"  - {tag}: {n}"
+            for tag, n in emotion_tally.most_common()
+        ] or ["  - (none)"]
+
         return (
             f"# Dataset report\n\n"
+            f"- Manifest version: **{MANIFEST_VERSION}**\n"
             f"- Kept chunks: **{kept}** / {total}\n"
             f"- Drop reasons: {dict(dropped) or '(none)'}\n"
             f"- Languages: {dict(lang_tally) or '(none)'}\n\n"
@@ -397,14 +582,18 @@ class DatasetAgent:
             f"  - short  (<5s): {bucket_dur['short']}\n"
             f"  - medium (5-10s): {bucket_dur['medium']}\n"
             f"  - long   (>=10s): {bucket_dur['long']}\n\n"
-            f"## Energy buckets\n\n"
+            f"## Energy buckets (adaptive, ADR-0011)\n\n"
+            f"  Thresholds this ingest: p33={energy_p33:.4f} / p66={energy_p66:.4f}\n"
             f"  - quiet:  {bucket_energy['quiet']}\n"
             f"  - normal: {bucket_energy['normal']}\n"
             f"  - loud:   {bucket_energy['loud']}\n\n"
             f"## Prosody (terminal punctuation)\n\n"
             f"  - declarative: {bucket_prosody['declarative']}\n"
             f"  - question:    {bucket_prosody['question']}\n"
-            f"  - exclamation: {bucket_prosody['exclamation']}\n"
+            f"  - exclamation: {bucket_prosody['exclamation']}\n\n"
+            f"## Emotion distribution (emotion2vec)\n\n"
+            + "\n".join(emotion_lines)
+            + "\n"
         )
 
 
