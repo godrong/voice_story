@@ -40,7 +40,9 @@ logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_COSYVOICE_PYTHON = "/opt/homebrew/Caskroom/miniforge/base/envs/cosyvoice/bin/python"
+DEFAULT_COSYVOICE3_PYTHON = "/opt/homebrew/Caskroom/miniforge/base/envs/cosyvoice3/bin/python"
 DEFAULT_WORKER_SCRIPT = REPO_ROOT / "core" / "tts_worker.py"
+DEFAULT_WORKER3_SCRIPT = REPO_ROOT / "core" / "cosyvoice3_worker.py"
 
 
 class TTSError(RuntimeError):
@@ -354,6 +356,12 @@ def get_tts_backend(kind: str = "local", **kwargs) -> TTSBackend:
     """
     if kind == "local":
         return LocalSubprocessTTS(**kwargs)
+    if kind == "cosyvoice3":
+        return LocalSubprocessTTS(
+            env_python=DEFAULT_COSYVOICE3_PYTHON,
+            worker_script=DEFAULT_WORKER3_SCRIPT,
+            **kwargs,
+        )
     raise ValueError(f"Unknown TTS backend kind: {kind!r}")
 
 

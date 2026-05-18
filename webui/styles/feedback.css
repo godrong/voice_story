@@ -1,0 +1,59 @@
+/*
+ * feedback.css — star rating, tag chips, feedback note textarea.
+ *
+ * feedback.css ——星标评分、标签 chip、备注 textarea。
+ */
+
+.stars {
+  display: inline-flex;
+  gap: 4px;
+  font-size: 22px;
+  user-select: none;
+}
+
+.star {
+  cursor: pointer;
+  color: var(--fg-muted);
+  transition: color 0.1s ease;
+}
+
+.star.is-active { color: var(--warn); }
+.star:hover { color: var(--warn); }
+
+.tag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 10px 0;
+}
+
+.tag-chip {
+  background: var(--bg-elev);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.tag-chip:hover { border-color: var(--accent-soft); }
+
+.tag-chip.is-active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.feedback-actions {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.feedback-saved {
+  color: var(--ok);
+  font-size: 12px;
+}

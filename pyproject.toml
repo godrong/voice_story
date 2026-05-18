@@ -42,6 +42,25 @@ asr = [
 tts = [
     # CosyVoice is installed from source; pinned via uv sources below
 ]
+webui = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "python-multipart>=0.0.9",
+]
+eval = [
+    # TTS-output evaluation metrics. WavLM weights auto-download from HF on first use.
+    # TTS 合成输出评测；WavLM 权重首次调用时从 HuggingFace 自动下载；
+    # DNSMOS ONNX 权重已随 speechmos 打包。
+    "jiwer>=3.0",       # WER / CER computation
+    "speechmos>=0.0.1", # DNSMOS-P808 neural MOS predictor (UTMOS pending — fairseq dep blocks pip install)
+]
+bilibili = [
+    # B 站音频提取 agent（tools/bilibili_mcp/）。yt-dlp 为 B 站做的更新很频繁，
+    # 建议每次报错先 `pip install -U yt-dlp` 再排查。mcp 是模型上下文协议 SDK，
+    # 用于把 extractor 暴露成可被 Claude Code 直接调用的工具。
+    "yt-dlp>=2025.1.15",
+    "mcp>=1.0",
+]
 adk = [
     "google-adk>=0.1",
     "litellm>=1.40",
@@ -70,4 +89,8 @@ target-version = "py310"
 select = ["E", "F", "I", "B", "UP"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "tools"]
+pythonpath = ["."]
+markers = [
+    "online: tests that hit live network endpoints (e.g. B 站 CDN). Skipped by default.",
+]

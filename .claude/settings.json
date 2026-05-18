@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git tag *)",
+      "Bash(git -c user.email=wang2461@e.ntu.edu.sg -c user.name=voice-story commit -m ' *)",
+      "Bash(python3 -c ' *)",
+      "Bash(python3 -c \"import sys; print\\(sys.version\\)\")",
+      "Bash(python3 -c \"import numpy, soundfile\")",
+      "Bash(conda env *)",
+      "Bash(conda run -n ai_study python -c ' *)",
+      "Bash(conda run *)"
+    ]
+  }
+}

@@ -68,7 +68,7 @@ instruct_prompts:
     text: null   # = zero_shot mode
 
   - id: en_rising
-    text: "Speak with rising intonation at sentence endings, in an emphatic political-speech style."
+    text: "Speak with rising intonation at every stops or sentence endings, in an emphatic political-speech style."
 
   - id: en_emphatic
     text: "Speak in the style of a confident American politician, with strong emphasis, dramatic pauses, and slight rising tone at sentence endings."

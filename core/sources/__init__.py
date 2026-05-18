@@ -121,7 +121,13 @@ def _kaggle(**kw):
     return KaggleSource(**kw)
 
 
+def _bilibili(**kw):
+    from .bilibili import BilibiliSource
+    return BilibiliSource(**kw)
+
+
 REGISTRY = {
     "local": _local,
     "kaggle": _kaggle,
+    "bilibili": _bilibili,
 }

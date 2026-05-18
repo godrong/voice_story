@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "bilibili-extract": {
+      "command": "conda",
+      "args": [
+        "run",
+        "--no-capture-output",
+        "-n",
+        "ai_study",
+        "python",
+        "-m",
+        "tools.bilibili_mcp.server"
+      ]
+    }
+  }
+}
