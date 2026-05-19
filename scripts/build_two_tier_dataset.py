@@ -982,13 +982,113 @@ def resolve_audio_path(path: str) -> Path:
 
 
 @app.command("ingest-aishell3")
-def ingest_aishell3() -> None:
-    """(stub) Walk AISHELL-3, emit manifest. Implement after ESD pairs verified.
+def ingest_aishell3(
+    src: Path = typer.Option(..., help="Root of extracted AISHELL-3 (containing train/ test/)."),
+    out: Path = typer.Option(
+        REPO_ROOT / "datasets" / "aishell3" / "manifest.jsonl",
+        help="Output manifest.jsonl path.",
+    ),
+    max_speakers: int = typer.Option(0, "--max-speakers", help="Cap on speakers (0 = all)."),
+    train_only: bool = typer.Option(True, "--train-only / --include-test"),
+    min_dur: float = typer.Option(1.0, "--min-dur"),
+    max_dur: float = typer.Option(15.0, "--max-dur"),
+    log_level: str = typer.Option("INFO", "--log-level"),
+) -> None:
+    """Ingest AISHELL-3 (218-spk Chinese studio corpus) → M1 manifest.
 
-    （占位）AISHELL-3 ingest；ESD 训练对验证后再做。
+    把 AISHELL-3 转成 M1 manifest。AISHELL-3 是 218 说话人中文录音室
+    数据集，没有 emotion 标签，全部标 `neutral`。
+
+    Audio paths in the manifest are **absolute** from src.
+    Use ``rebase-paths`` afterwards to make them portable.
+    manifest 里的 audio_path 是**绝对路径**；之后用 rebase-paths 改写成
+    ``${AISHELL3_ROOT}/...`` 形式。
     """
-    typer.echo("Not yet implemented — see RESEARCH_PLAN §3.2 / Week 1.")
-    raise typer.Exit(2)
+    logging.basicConfig(
+        level=getattr(logging, log_level.upper()),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    src = src.expanduser().resolve()
+    out = out.expanduser().resolve()
+    if not src.is_dir():
+        typer.echo(f"ERROR: src does not exist: {src}", err=True)
+        raise typer.Exit(1)
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    splits = ["train"] if train_only else ["train", "test"]
+    rows_written = 0
+    speakers_seen: set[str] = set()
+    skipped_no_text = 0
+    skipped_dur = 0
+    skipped_score = 0
+
+    with out.open("w", encoding="utf-8") as fp:
+        for split in splits:
+            split_dir = src / split
+            if not split_dir.is_dir():
+                logger.warning("split dir not found: %s", split_dir)
+                continue
+            speaker_dirs = sorted(d for d in split_dir.iterdir() if d.is_dir())
+            if max_speakers > 0:
+                speaker_dirs = speaker_dirs[:max_speakers]
+            logger.info("[%s] %d speakers", split, len(speaker_dirs))
+
+            for spk_dir in speaker_dirs:
+                spk_id = f"aishell3_{spk_dir.name}"
+                speakers_seen.add(spk_id)
+                wavs = sorted(spk_dir.glob("*.wav"))
+                logger.info("  %s: %d wavs", spk_id, len(wavs))
+
+                for wav_path in wavs:
+                    text_path = wav_path.with_suffix(".txt")
+                    if not text_path.exists():
+                        skipped_no_text += 1
+                        continue
+                    text = text_path.read_text(encoding="utf-8").strip()
+                    if not text:
+                        skipped_no_text += 1
+                        continue
+
+                    try:
+                        scores = _score_one_wav(wav_path)
+                    except Exception as e:
+                        logger.debug("score failed for %s: %s; skipping", wav_path, e)
+                        skipped_score += 1
+                        continue
+
+                    dur = scores["duration"]
+                    if dur < min_dur or dur > max_dur:
+                        skipped_dur += 1
+                        continue
+
+                    row = ManifestRow(
+                        manifest_version="1.1",
+                        chunk_id=f"aishell3_{spk_dir.name}_{wav_path.stem}",
+                        audio_path=str(wav_path),
+                        source_file=str(wav_path),
+                        speaker_id=spk_id,
+                        text=text,
+                        lang="zh",
+                        duration=dur,
+                        emotion_tag="neutral",
+                        emotion_confidence=1.0,
+                        snr_db=scores["snr_db"],
+                        mos_ovr=scores["mos_ovr"],
+                        mos_sig=scores["mos_sig"],
+                        mos_bak=scores["mos_bak"],
+                        clipped=scores["clipped"],
+                        source_dataset="aishell3",
+                    )
+                    fp.write(json.dumps(asdict(row), ensure_ascii=False) + "\n")
+                    rows_written += 1
+
+                    if rows_written % 1000 == 0:
+                        logger.info("  ... %d rows written (%d speakers so far)", rows_written, len(speakers_seen))
+
+    typer.echo(f"\n✓ wrote {rows_written} manifest rows to {out}")
+    typer.echo(f"  speakers: {len(speakers_seen)}")
+    typer.echo(f"  skipped — no text: {skipped_no_text}  bad duration: {skipped_dur}  score fail: {skipped_score}")
 
 
 @app.command("ingest-libritts")

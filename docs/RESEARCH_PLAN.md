@@ -353,7 +353,13 @@
 
 ---
 
-## 9. 文档维护
+## 9. 关联文档
+
+- **[AUTODL_H800_GUIDE.md](AUTODL_H800_GUIDE.md)** — H800 实例创建 + 环境搭建 + 数据下载 + train/inference 分工 + 中文数据集策略
+- [PLAN.md](PLAN.md) — 架构文档
+- [ROADMAP.md](ROADMAP.md) — 里程碑跟踪
+
+## 10. 文档维护
 
 - 本文档每个 milestone 后**更新一次**
 - 新发现 / 新决策 → 加入 §5 决策记录
