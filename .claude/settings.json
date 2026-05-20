@@ -8,7 +8,9 @@
       "Bash(python3 -c \"import numpy, soundfile\")",
       "Bash(conda env *)",
       "Bash(conda run -n ai_study python -c ' *)",
-      "Bash(conda run *)"
+      "Bash(conda run *)",
+      "Bash(ssh -i /tmp/voice_story_h800_key *)",
+      "Bash(scp -i /tmp/voice_story_h800_key *)"
     ]
   }
 }
