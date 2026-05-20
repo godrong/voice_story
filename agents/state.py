@@ -144,6 +144,9 @@ class PipelineState:
                    SourceAgent 产出的标准化 WAV 列表。
         vocal_files: Vocal-only WAVs produced by separation step.
                      separation 步骤产出的人声分离结果。
+        enhanced_files: VoiceFixer-enhanced WAVs (ADR-0012); empty when
+                        --skip-enhance. enhance 步骤产出的增强语音；关闭
+                        增强时为空。
         chunks: VAD-segmented chunks.
                 VAD 切片结果。
         transcripts: ASR results keyed by chunk_id.
@@ -160,6 +163,7 @@ class PipelineState:
     source_meta: SourceMeta | None = None
     raw_files: list[Path] = field(default_factory=list)
     vocal_files: list[Path] = field(default_factory=list)
+    enhanced_files: list[Path] = field(default_factory=list)
     chunks: list[ChunkInfo] = field(default_factory=list)
     transcripts: dict[str, TranscriptInfo] = field(default_factory=dict)
     quality: dict[str, QualityScore] = field(default_factory=dict)
@@ -169,8 +173,9 @@ class PipelineState:
     def ensure_dirs(self) -> None:
         """Create the standard subdirectories under dataset_root.
 
-        在 dataset_root 下创建标准子目录（raw/vocals/chunks），
-        每个 stage 都假设这些目录存在。
+        在 dataset_root 下创建标准子目录（raw/vocals/enhanced/chunks），
+        每个 stage 都假设这些目录存在。enhanced/ 仅在启用 VoiceFixer 时
+        实际写入，目录预先创建无副作用。
         """
-        for sub in ("raw", "vocals", "chunks"):
+        for sub in ("raw", "vocals", "enhanced", "chunks"):
             (self.dataset_root / sub).mkdir(parents=True, exist_ok=True)

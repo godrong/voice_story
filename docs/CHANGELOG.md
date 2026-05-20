@@ -11,6 +11,50 @@
 - M2 续: synthesis_agent (book sentence → TTS 串联)
 - M3: ADK evaluation framework + speaker-sim / WER / MOS-pred 回归脚本
 
+## [0.1.5] - 2026-05-19
+
+### Added — 前端清洗级联：Demucs + VoiceFixer（ADR-0012）
+- **core/enhance.py**: `VoiceEnhancer` 类，包 VoiceFixer，惰性加载、输出统一
+  24 kHz mono（与项目 TARGET_SR 对齐），idempotent skip-if-exists 行为
+- **agents/preprocess_agent.py**: 在 `Separator` 与 `VAD` 之间插入 `VoiceEnhancer`
+  作为 stage 2.5；VAD 默认从增强后的音频切片，下游 DNSMOS / ASR / ref 选择
+  都看到清洁信号
+- **agents/state.py**: `PipelineState.enhanced_files` 新字段；`ensure_dirs()`
+  额外创建 `enhanced/` 子目录
+- **cli.py / agents/root_agent.py**: `--enhance / --skip-enhance` 与
+  `--enhance-mode {0,1,2}`，默认开启 mode 0（general restoration）
+- **pyproject.toml**: `preprocess` extras 加 `voicefixer>=0.1.3`
+
+### Why
+- biggvoice (中文 LoL 直播 3.4 min 样本) 跑完 Demucs 后所有 24 个 chunk 的
+  DNSMOS-OVR 仍在 0.99~1.36，全数被 `low_mos` 一刀切，manifest 为空
+- 听感诊断：Demucs (`htdemucs`) 训练目标是"歌曲 + 乐器伴奏"，对游戏音效 /
+  麦克风噪声等非音乐性背景声没有先验，stem 残留宽带噪声
+- VoiceFixer mode-0 对同 chunk 把 OVR 从 1.91 拉到 2.66、bak 从 1.52 拉到
+  3.06；以增强后 chunk 当 ref 重合成同 3 段文本，DNSMOS 从 2.31~2.95 升到
+  2.86~3.58，听感"嘶哑感"消失
+- 不在管线里固化的话：① DNSMOS 评分坍缩失去过滤意义 ② ASR 受背景音干扰
+  错字 ③ 下游用户每次还要单独洗 ref
+
+### 验证（biggvoice 反例）
+| 阶段 | mos_ovr | sig (语音) | bak (背景) |
+|---|---|---|---|
+| 仅 Demucs (mos_ovr=1.91 最佳 chunk) | 1.91 | 3.46 | 1.52 |
+| Demucs + VoiceFixer mode-0 | 2.66 | 3.20 | 3.06 |
+
+合成 A/B（biggvoice ref → 3 段中文文本）:
+| 文本 | 原 ref MOS | 增强 ref MOS | Δ |
+|---|---|---|---|
+| 中性问候 | 2.95 | 3.58 | +0.64 |
+| 小说叙述 | 2.31 | 3.53 | **+1.22** |
+| 直播风格 | 2.77 | 2.86 | +0.09 |
+
+### 关联文档
+- docs/decisions/0012-cascaded-front-end-cleaning.md
+- datasets/biggvoice/ — 反例样本（README 见生成的 report.md）
+
+Refs: ADR-0012, PLAN#3.A.3
+
 ## [0.1.4] - 2026-05-14
 
 ### Added — TTS 文本规范化（B 层，朗读专用）

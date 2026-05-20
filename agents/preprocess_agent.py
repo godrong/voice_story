@@ -1,26 +1,30 @@
-"""PreprocessAgent: chains separation -> VAD -> (optional) speaker filter.
+"""PreprocessAgent: chains separation -> enhance -> VAD -> (optional) speaker filter.
 
-Reads `state.raw_files` (standardized WAVs from SourceAgent), runs each
-file through Demucs (per ADR-0008 always on), splits into chunks via
-Silero VAD, and optionally filters by speaker similarity if the source
-declares it's multi-speaker AND a reference clip is provided.
+Reads `state.raw_files` (standardized WAVs from SourceAgent), runs each file
+through Demucs (per ADR-0008 always on), then VoiceFixer (per ADR-0012, opt-out),
+splits into chunks via Silero VAD, and optionally filters by speaker similarity
+if the source declares it's multi-speaker AND a reference clip is provided.
 
 Outputs:
-  - `<dataset_root>/vocals/<stem>.wav` per source
-  - `<dataset_root>/chunks/<chunk_id>.wav` per chunk
-  - `state.vocal_files` and `state.chunks` populated
+  - `<dataset_root>/vocals/<stem>.wav` per source (Demucs output)
+  - `<dataset_root>/enhanced/<stem>.wav` per source (VoiceFixer output, when enabled)
+  - `<dataset_root>/chunks/<chunk_id>.wav` per chunk (cut from enhanced if on,
+    else from vocals)
+  - `state.vocal_files` / `state.enhanced_files` / `state.chunks` populated
 
-预处理 agent：分离 → VAD → (可选) 说话人过滤。
+预处理 agent：分离 → 增强 → VAD → (可选) 说话人过滤。
 
 读取 SourceAgent 写入的 raw_files，按以下顺序处理每个文件：
   1. Demucs 人声分离（ADR-0008 默认强制开）
-  2. Silero VAD 切片成 3~15s
-  3. （可选）说话人定位：仅当 source 声明多说话人且提供了参考片段时才跑
+  2. VoiceFixer 二级清洗（ADR-0012 默认开，可 --skip-enhance）
+  3. Silero VAD 切片成 3~15s（chunk 从增强后的音频切，下游 DNSMOS 才有意义）
+  4. （可选）说话人定位：仅当 source 声明多说话人且提供了参考片段时才跑
 
 输出：
-  - <dataset_root>/vocals/<stem>.wav 每个源一份
-  - <dataset_root>/chunks/<chunk_id>.wav 每段一份
-  - state.vocal_files / state.chunks 写满
+  - <dataset_root>/vocals/<stem>.wav 每个源一份（Demucs 产物）
+  - <dataset_root>/enhanced/<stem>.wav 每个源一份（VoiceFixer 产物，开了才有）
+  - <dataset_root>/chunks/<chunk_id>.wav 每段一份（从 enhanced 切；关了才从 vocals 切）
+  - state.vocal_files / state.enhanced_files / state.chunks 写满
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from core.enhance import VoiceEnhancer
 from core.separation import Separator
 from core.vad import VAD, chunk_id_for, write_chunks
 
@@ -50,6 +55,13 @@ class PreprocessAgent:
             说话人相似度阈值（默认 0.65）。
         separator_model: Demucs model name. Defaults to htdemucs.
             Demucs 模型名，默认 htdemucs。
+        enable_enhance: Whether to run VoiceFixer between Demucs and VAD.
+            Default True per ADR-0012. Set False for clean studio sources
+            where the second pass would only soften timbre.
+            是否在 Demucs 与 VAD 之间跑 VoiceFixer。默认开（ADR-0012）。
+            对录音棚级干净源可以关掉，省时间且不磨细节。
+        enhance_mode: VoiceFixer mode (0=general, 1=stronger denoise, 2=de-reverb).
+            VoiceFixer 模式，默认 0（通用）。
         vad_kwargs: Forwarded to VAD constructor (min_sec / max_sec / ...).
             传给 VAD 构造函数的关键字参数。
     """
@@ -62,11 +74,15 @@ class PreprocessAgent:
         speaker_reference: Path | str | None = None,
         speaker_threshold: float = 0.65,
         separator_model: str = "htdemucs",
+        enable_enhance: bool = True,
+        enhance_mode: int = 0,
         vad_kwargs: dict | None = None,
     ) -> None:
         self.speaker_reference = Path(speaker_reference) if speaker_reference else None
         self.speaker_threshold = speaker_threshold
         self.separator = Separator(model_name=separator_model)
+        self.enable_enhance = enable_enhance
+        self.enhancer = VoiceEnhancer(mode=enhance_mode) if enable_enhance else None
         self.vad = VAD(**(vad_kwargs or {}))
 
     async def run(self, state: PipelineState) -> PipelineState:
@@ -91,21 +107,34 @@ class PreprocessAgent:
             raise ValueError("PreprocessAgent: state.raw_files is empty")
         state.ensure_dirs()
         vocals_dir = state.dataset_root / "vocals"
+        enhanced_dir = state.dataset_root / "enhanced"
         chunks_dir = state.dataset_root / "chunks"
 
         for raw_path in state.raw_files:
             vocal_path = self.separator.separate(raw_path, vocals_dir)
             state.vocal_files.append(vocal_path)
 
-            chunks = self.vad.chunk(vocal_path)
-            stem = vocal_path.stem
+            # Stage 2.5: VoiceFixer cleans residual noise Demucs left behind
+            # (mic hiss, SFX residue, broadband noise). Chunks are cut from
+            # the enhanced file when enabled, so downstream DNSMOS / ASR see
+            # clean audio.
+            # 2.5 阶段：VoiceFixer 清理 Demucs 残留的噪声，VAD 从增强后
+            # 音频切片，下游 DNSMOS / ASR 看到的就是干净人声。
+            if self.enhancer is not None:
+                source_for_chunks = self.enhancer.enhance(vocal_path, enhanced_dir)
+                state.enhanced_files.append(source_for_chunks)
+            else:
+                source_for_chunks = vocal_path
+
+            chunks = self.vad.chunk(source_for_chunks)
+            stem = source_for_chunks.stem
             chunk_paths = write_chunks(chunks, chunks_dir, stem)
             for c, p in zip(chunks, chunk_paths):
                 cid = chunk_id_for(stem, c)
                 state.chunks.append(ChunkInfo(
                     chunk_id=cid,
                     path=p,
-                    source_file=vocal_path,
+                    source_file=source_for_chunks,
                     start_sec=c.start_sec,
                     end_sec=c.end_sec,
                 ))
@@ -128,8 +157,8 @@ class PreprocessAgent:
             )
 
         logger.info(
-            "PreprocessAgent: %d vocal files -> %d chunks",
-            len(state.vocal_files), len(state.chunks),
+            "PreprocessAgent: %d vocal files -> %d enhanced -> %d chunks",
+            len(state.vocal_files), len(state.enhanced_files), len(state.chunks),
         )
         return state
 

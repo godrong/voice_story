@@ -53,6 +53,8 @@ def build_m1_pipeline(
     max_files: int | None = None,
     overwrite: bool = False,
     lang_hint: str | None = None,
+    enable_enhance: bool = True,
+    enhance_mode: int = 0,
     vad_kwargs: dict | None = None,
 ) -> list[Stage]:
     """Construct the M1 data-pipeline stages in execution order.
@@ -68,6 +70,10 @@ def build_m1_pipeline(
         max_files: Cap on source file count (dev iteration aid).
         overwrite: Re-transcode even when raw/ already has output.
         lang_hint: Force a language for ASR (skips langid).
+        enable_enhance: Run VoiceFixer between Demucs and VAD (ADR-0012).
+            Default True; pass False for clean studio sources.
+        enhance_mode: VoiceFixer mode (0=general/default, 1=stronger denoise,
+            2=de-reverb).
         vad_kwargs: Forwarded to VAD constructor.
 
     Returns:
@@ -81,6 +87,8 @@ def build_m1_pipeline(
         PreprocessAgent(
             speaker_reference=speaker_reference,
             speaker_threshold=speaker_threshold,
+            enable_enhance=enable_enhance,
+            enhance_mode=enhance_mode,
             vad_kwargs=vad_kwargs,
         ),
         DatasetAgent(

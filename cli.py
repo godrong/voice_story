@@ -100,6 +100,13 @@ def ingest(
     needs_separation: bool = typer.Option(
         True, help="Run Demucs vocal separation. Default True per ADR-0008.",
     ),
+    enhance: bool = typer.Option(
+        True, "--enhance/--skip-enhance",
+        help="Run VoiceFixer after Demucs. Default True per ADR-0012.",
+    ),
+    enhance_mode: int = typer.Option(
+        0, help="VoiceFixer mode: 0=general, 1=stronger denoise, 2=de-reverb.",
+    ),
     max_files: int = typer.Option(
         None, help="Cap on number of source files (dev iteration aid).",
     ),
@@ -149,6 +156,8 @@ def ingest(
         max_files=max_files,
         overwrite=overwrite,
         lang_hint=lang_hint,
+        enable_enhance=enhance,
+        enhance_mode=enhance_mode,
     )
     state = asyncio.run(run_pipeline(stages, out_root / name))
     console.print(f"[green]done[/green]: {state.manifest_path}")
