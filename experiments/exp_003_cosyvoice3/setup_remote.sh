@@ -14,27 +14,12 @@ mkdir -p /root/autodl-tmp/datasets
 mkdir -p /root/CosyVoice/pretrained_models
 
 echo "============================================"
-echo "Step 2: Download CV3-Eval dataset (Chinese + English eval)"
+echo "Step 2: Install Python dependencies"
 echo "============================================"
-cd /root/autodl-tmp/datasets
-if [ ! -d "CV3-Eval" ]; then
-    git clone https://github.com/FunAudioLLM/CV3-Eval.git || {
-        echo "git clone failed, trying direct download..."
-        wget -q https://github.com/FunAudioLLM/CV3-Eval/archive/refs/heads/main.zip
-        unzip -o main.zip
-        mv CV3-Eval-main CV3-Eval
-    }
-fi
-echo "CV3-Eval structure:"
-ls CV3-Eval/ 2>/dev/null || echo "(checking...)"
+pip install nisqa jiwer soundfile librosa funasr faster-whisper datasets -q 2>&1 | tail -5
 
 echo "============================================"
-echo "Step 3: Install Python dependencies"
-echo "============================================"
-pip install nisqa jiwer soundfile librosa funasr faster-whisper -q 2>&1 | tail -3
-
-echo "============================================"
-echo "Step 4: Download NISQA weights"
+echo "Step 3: Download NISQA weights"
 echo "============================================"
 python3 -c "
 import urllib.request
@@ -47,6 +32,12 @@ else:
     urllib.request.urlretrieve(url, dest)
     print('NISQA weights ready')
 "
+
+echo "============================================"
+echo "Step 4: Prep MCGA dataset from HuggingFace"
+echo "============================================"
+cd /root/voice_story/experiments/exp_003_cosyvoice3
+python3 prep_mcga.py --output_dir /root/autodl-tmp/datasets/mcga
 
 echo "============================================"
 echo "Step 5: Verify CosyVoice 3 model"

@@ -136,32 +136,49 @@ def compute_wer(syn_wav: Path, target_text: str, lang: str = "zh") -> tuple[floa
 # Main pipeline
 # ---------------------------------------------------------------------------
 
-def load_eval_set(eval_dir: Path) -> list[dict]:
-    """Load evaluation pairs from CV3-Eval format or a simple jsonl manifest.
+def load_eval_set(eval_path: Path) -> list[dict]:
+    """Load evaluation pairs from JSONL manifest or CV3-Eval directory.
 
-    Expected format per item: {ref_wav, text, [prompt_text], [lang]}
+    Supports:
+      - Direct JSONL file: each line = {id, text, ref_wav, prompt_text?, lang?}
+      - Directory with eval_pairs.jsonl (MCGA prepped format)
+      - CV3-Eval directory: text file + prompt_wavs/ or wavs/
     """
     items = []
-    if eval_dir.is_dir():
-        # CV3-Eval format: text file + ref_wavs/ or prompt_wavs/
-        text_file = eval_dir / "text"
+
+    # JSONL file directly
+    if eval_path.is_file() and eval_path.suffix == ".jsonl":
+        with open(eval_path) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    items.append(json.loads(line))
+        return items
+
+    # Directory: check for eval_pairs.jsonl first
+    jsonl = eval_path / "eval_pairs.jsonl"
+    if jsonl.exists():
+        with open(jsonl) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    items.append(json.loads(line))
+        return items
+
+    # CV3-Eval format: text file + prompt_wavs/ or wavs/
+    if eval_path.is_dir():
+        text_file = eval_path / "text"
         if text_file.exists():
             with open(text_file) as f:
                 for line in f:
                     parts = line.strip().split(maxsplit=1)
                     if len(parts) == 2:
                         utt_id, text = parts
-                        ref_wav = eval_dir / "prompt_wavs" / f"{utt_id}.wav"
+                        ref_wav = eval_path / "prompt_wavs" / f"{utt_id}.wav"
                         if not ref_wav.exists():
-                            ref_wav = next(eval_dir.glob(f"{utt_id}*.wav"), None)
+                            ref_wav = next(eval_path.glob(f"{utt_id}*.wav"), None)
                         if ref_wav:
                             items.append({"id": utt_id, "text": text, "ref_wav": str(ref_wav), "lang": "zh"})
-    # Also support direct wav + jsonl
-    jsonl = eval_dir / "eval_pairs.jsonl"
-    if jsonl.exists():
-        with open(jsonl) as f:
-            for line in f:
-                items.append(json.loads(line))
     return items
 
 
