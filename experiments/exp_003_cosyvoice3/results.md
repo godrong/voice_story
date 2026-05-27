@@ -82,4 +82,25 @@ prosody precision by 23 Hz. This validates the core research hypothesis:
 - [x] LoRA rank=8 vs baseline comparison
 - [ ] Consistent ref audio comparison between CosyVoice 2 and 3
 - [ ] MCGA dataset zero-shot eval (needs HF access or modelscope mirror for data download)
+## Chinese Domain Adaptation (1000 CN pairs, rank=8, 300 steps)
+
+| Metric | Baseline | CN LoRA r=8 | Δ |
+|---|---|---|---|
+| MOS-NISQA | 4.024 | 4.065 | +0.041 |
+| SECS | 0.945 | 0.941 | -0.004 |
+| CER | 0.159 | 0.167 | +0.008 |
+| **F0 RMSE** | **97.1 Hz** | **83 Hz** | **-14.0 Hz** |
+
+CER did not improve from cross-emotion LoRA. Finding: style LoRA helps
+prosody (F0), not intelligibility (CER). CER reduction likely requires
+more Chinese training data or ASR-aligned training objective.
+
+## Next Steps
+
+- [x] 4-axis baseline established
+- [x] LoRA rank ablation (8/16/32)
+- [x] LoRA rank=8 vs baseline comparison
+- [x] Chinese domain adaptation (F0 improved, CER unchanged)
+- [ ] AISHELL-3 or larger Chinese dataset for CER-focused LoRA
+- [ ] MCGA dataset zero-shot eval
 - [ ] LoRA training after full MCGA release (train split)
