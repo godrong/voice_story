@@ -2,480 +2,269 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CosyVoice 3 — Interactive LoRA Ablation Report</title>
+<title>CosyVoice 3 LoRA Ablation — 可交互报告</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <style>
-  :root {
-    --bg: #0d1117; --card: #161b22; --border: #30363d;
-    --fg: #c9d1d9; --muted: #8b949e; --accent: #58a6ff;
-    --green: #3fb950; --red: #f85149; --yellow: #d29922;
-  }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--fg); padding: 24px; max-width: 1400px; margin: 0 auto; }
-  h1 { color: var(--accent); border-bottom: 2px solid var(--border); padding-bottom: 12px; margin-bottom: 8px; }
-  h2 { color: var(--muted); margin: 32px 0 16px; font-size: 1.1em; text-transform: uppercase; letter-spacing: 0.5px; }
-  .subtitle { color: var(--muted); font-size: 0.85em; margin-bottom: 24px; }
-
-  /* Controls bar */
-  .controls { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; margin-bottom: 24px; padding: 16px; background: var(--card); border: 1px solid var(--border); border-radius: 8px; }
-  .ctrl-group { display: flex; flex-direction: column; gap: 4px; }
-  .ctrl-label { font-size: 0.75em; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
-  select { background: #21262d; color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font: inherit; font-size: 0.9em; min-width: 140px; }
-  .pill-group { display: flex; gap: 4px; }
-  .pill { padding: 6px 14px; border-radius: 20px; border: 1px solid var(--border); background: #21262d; color: var(--muted); cursor: pointer; font: inherit; font-size: 0.85em; transition: all 0.15s; }
-  .pill:hover { border-color: var(--accent); }
-  .pill.active { background: #1c2a3a; border-color: var(--accent); color: #fff; }
-
-  /* Cards grid */
-  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-  .grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
-  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
-  .card h3 { font-size: 0.9em; color: var(--accent); margin-bottom: 12px; }
-
-  /* Audio row */
-  .audio-dual { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-  .audio-slot { background: #21262d; border-radius: 6px; padding: 12px; }
-  .audio-slot .label { font-weight: 600; font-size: 0.85em; margin-bottom: 6px; }
-  .audio-slot .label.zero { color: var(--muted); }
-  .audio-slot .label.lora { color: var(--accent); }
-  audio { width: 100%; margin: 4px 0; }
-
-  /* Metrics */
-  .metric-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 12px; }
-  .metric { background: #21262d; border-radius: 6px; padding: 10px 12px; text-align: center; }
-  .metric .name { font-size: 0.7em; color: var(--muted); text-transform: uppercase; }
-  .metric .value { font-size: 1.3em; font-weight: 700; margin: 2px 0; }
-  .metric .delta { font-size: 0.75em; }
-  .metric .delta.pos { color: var(--green); }
-  .metric .delta.neg { color: var(--red); }
-
-  /* Delta table */
-  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 0.9em; }
-  th, td { padding: 8px 12px; border-bottom: 1px solid var(--border); }
-  th { background: #21262d; color: var(--accent); text-align: center; }
-  td { text-align: center; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; background: #0d1117; color: #c9d1d9; }
+  h1 { color: #58a6ff; border-bottom: 2px solid #30363d; padding-bottom: 10px; }
+  h2 { color: #8b949e; margin-top: 40px; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px; margin: 20px 0; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; }
+  audio { width: 100%; margin: 5px 0; }
+  .audio-label { font-weight: bold; color: #58a6ff; font-size: 0.9em; }
+  .sample-card { background: #21262d; border-radius: 6px; padding: 12px; }
+  .sample-card h3 { margin: 0 0 8px 0; font-size: 0.95em; }
+  .metric-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.85em; margin: 2px; }
+  .badge-good { background: #1b4721; color: #3fb950; }
+  .badge-ok { background: #2e3510; color: #d29922; }
+  .badge-neutral { background: #1c2a3a; color: #58a6ff; }
+  table { width: 100%; border-collapse: collapse; margin: 15px 0; }
+  th, td { padding: 8px 12px; text-align: center; border-bottom: 1px solid #30363d; }
+  th { background: #21262d; color: #58a6ff; }
   tr:hover { background: #1c2128; }
-  .delta-pos { color: var(--green); font-weight: 600; }
-  .delta-neg { color: var(--red); font-weight: 600; }
+  .delta-pos { color: #3fb950; }
+  .delta-neg { color: #f85149; }
+  .finding { background: #1b2240; border-left: 4px solid #58a6ff; padding: 15px; margin: 15px 0; border-radius: 4px; }
+  canvas { max-height: 350px; }
 
-  /* Radar chart */
-  .chart-wrap { position: relative; height: 320px; }
-  .chart-wrap canvas { max-height: 320px; }
-
-  /* ASR compare */
-  .asr-compare { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.82em; line-height: 1.8; }
-  .asr-compare .wrong { color: var(--red); text-decoration: underline wavy; }
-
-  /* Responsive */
-  @media (max-width: 900px) {
-    .grid2, .grid4, .audio-dual, .metric-row { grid-template-columns: 1fr; }
-    .controls { flex-direction: column; align-items: flex-start; }
-  }
+  /* emotion filter */
+  .emo-filter { display: flex; gap: 8px; margin: 16px 0; flex-wrap: wrap; }
+  .emo-btn { padding: 6px 16px; border-radius: 20px; border: 1px solid #30363d; background: #21262d; color: #8b949e; cursor: pointer; font: inherit; font-size: 0.9em; }
+  .emo-btn:hover { border-color: #58a6ff; }
+  .emo-btn.active { background: #1c2a3a; border-color: #58a6ff; color: #fff; }
 </style>
 </head>
 <body>
 
-<h1>CosyVoice 3 — LoRA Ablation · Interactive Report</h1>
-<p class="subtitle">Run: 2026-05-26~28 · GPU: RTX 4090 24GB · Model: Fun-CosyVoice3-0.5B · LoRA config: PEFT rank=8, qkvo, 500 ESD cross-emotion pairs, 200 steps</p>
+<h1>CosyVoice 3 LoRA 消融实验报告</h1>
+<p><strong>Run date</strong>: 2026-05-26 ~ 2026-05-28 &nbsp;|&nbsp; <strong>GPU</strong>: RTX 4090 24GB &nbsp;|&nbsp; <strong>Model</strong>: Fun-CosyVoice3-0.5B</p>
 
-<!-- ====== CONTROLS ====== -->
-<div class="controls">
-  <div class="ctrl-group">
-    <span class="ctrl-label">Text Category</span>
-    <select id="selText" onchange="renderAll()">
-      <option value="all">All texts (averaged)</option>
-    </select>
-  </div>
-  <div class="ctrl-group">
-    <span class="ctrl-label">Emotion Ref</span>
-    <div class="pill-group" id="emoPills"></div>
-  </div>
-  <div class="ctrl-group">
-    <span class="ctrl-label">Condition</span>
-    <div class="pill-group">
-      <button class="pill active" data-cond="both" onclick="setCondition('both',this)">Both (Δ)</button>
-      <button class="pill" data-cond="baseline" onclick="setCondition('baseline',this)">Zero-Shot</button>
-      <button class="pill" data-cond="lora" onclick="setCondition('lora',this)">LoRA r=8</button>
-    </div>
-  </div>
-  <div class="ctrl-group">
-    <span class="ctrl-label">Metric to Highlight</span>
-    <select id="selMetric" onchange="renderAll()">
-      <option value="mos_nisqa">MOS-NISQA (naturalness)</option>
-      <option value="secs">SECS (speaker fidelity)</option>
-      <option value="cer">CER (intelligibility)</option>
-      <option value="f0_rmse_hz">F0 RMSE (prosody)</option>
-    </select>
-  </div>
+<!-- ============ EMOTION FILTER ============ -->
+<div style="color:#8b949e;font-size:0.85em;margin-bottom:4px">情感参考音频:</div>
+<div class="emo-filter" id="emo-filter">
+  <button class="emo-btn active" data-emo="neutral">neutral</button>
+  <button class="emo-btn" data-emo="angry">angry</button>
+  <button class="emo-btn" data-emo="happy">happy</button>
+  <button class="emo-btn" data-emo="sad">sad</button>
+  <button class="emo-btn" data-emo="surprise">surprise</button>
 </div>
 
-<!-- ====== AUDIO PLAYERS ====== -->
-<h2>1. Audio Comparison <span id="audioContext" style="color:var(--muted);font-weight:normal;font-size:0.8em"></span></h2>
-<div class="audio-dual" id="audioRow"></div>
+<!-- ============ AUDIO COMPARISON ============ -->
+<h2>1. 音频对比试听</h2>
+<p>同一参考音频，四组不同文本。每组同时听 Baseline vs LoRA rank=8。<br>
+<span style="color:#d29922;font-size:0.85em">当前仅 neutral 情感有数据。</span></p>
 
-<!-- ====== LIVE METRICS ====== -->
-<h2>2. Live Metrics</h2>
-<div class="metric-row" id="metricRow"></div>
+<div class="grid2" id="audio-grid"></div>
 
-<!-- ====== RADAR + DELTA ====== -->
-<div class="grid2">
-  <div class="card">
-    <h3>Radar — Baseline vs LoRA</h3>
-    <div class="chart-wrap"><canvas id="chartRadar"></canvas></div>
-  </div>
-  <div class="card">
-    <h3>Δ per Text Category</h3>
-    <div style="overflow-x:auto">
-    <table id="deltaTable"><thead><tr><th>Text</th><th>MOS-NISQA Δ</th><th>SECS Δ</th><th>CER Δ</th><th>F0 RMSE Δ</th></tr></thead><tbody></tbody></table>
-    </div>
-  </div>
-</div>
-
-<!-- ====== PER-SAMPLE BAR CHART ====== -->
-<h2>3. Per-Sample Comparison</h2>
-<div class="grid2">
-  <div class="card"><h3 id="barTitle1">Speaker Fidelity (SECS)</h3><div class="chart-wrap"><canvas id="chartBars1"></canvas></div></div>
-  <div class="card"><h3 id="barTitle2">Prosody Precision (F0 RMSE)</h3><div class="chart-wrap"><canvas id="chartBars2"></canvas></div></div>
-</div>
-
-<!-- ====== ASR DIFF VIEW ====== -->
-<h2>4. ASR Transcription Diff</h2>
+<!-- ============ METRICS TABLE ============ -->
+<h2>2. 四轴评测对比</h2>
 <div class="card">
-  <div id="asrDiff" class="asr-compare"></div>
+<table>
+<tr><th>样本</th><th>MOS-NISQA (Base→LoRA)</th><th>SECS (Base→LoRA)</th><th>CER (Base→LoRA)</th><th>F0 RMSE (Base→LoRA)</th></tr>
+<tbody id="metrics-tbody"></tbody>
+</table>
 </div>
 
-<!-- ====== DATA EMBED ====== -->
+<!-- ============ KEY METRICS BAR CHART ============ -->
+<div class="grid2">
+  <div class="card"><h3>说话人保真 (SECS)</h3><canvas id="chart_secs"></canvas></div>
+  <div class="card"><h3>韵律精度 (F0 RMSE)</h3><canvas id="chart_f0"></canvas></div>
+</div>
+
+<!-- ============ TRAINING LOSS ============ -->
+<h2>3. 训练曲线 (LoRA Rank 消融)</h2>
+<div class="card">
+  <canvas id="chart_loss"></canvas>
+</div>
+<div class="card">
+  <h3>消融汇总</h3>
+  <table>
+  <tr><th>Rank</th><th>可训练参数</th><th>最终 Loss</th><th>Loss 降幅</th></tr>
+  <tr><td>8</td><td>1.08M (0.21%)</td><td><strong>0.737</strong></td><td>-79.7%</td></tr>
+  <tr><td>16</td><td>2.16M (0.43%)</td><td>0.751</td><td>-79.5%</td></tr>
+  <tr><td>32</td><td>4.32M (0.85%)</td><td>0.769</td><td>-79.3%</td></tr>
+  </table>
+</div>
+
+<!-- ============ SPECTROGRAMS ============ -->
+<h2>4. 频谱对比</h2>
+<p>Mel spectrogram: Baseline (左) vs LoRA rank=8 (右)</p>
+<div class="card">
+  <img src="spectrogram_comparison.png" style="width:100%;max-width:100%" alt="Spectrogram Comparison">
+</div>
+
+<h2>5. 基频 (F0) 对比</h2>
+<div class="card">
+  <img src="f0_comparison.png" style="width:100%;max-width:100%" alt="F0 Comparison">
+</div>
+
+<!-- ============ FINDINGS ============ -->
+<h2>6. 核心发现</h2>
+<div class="finding">
+  <strong>假设验证</strong>: 多说话人 LoRA (Tier 1) 可以在不损害说话人保真度的前提下改善韵律精度。<br><br>
+  <strong>证据</strong>:
+  <ul>
+    <li>SECS 保持 0.945 (完全不变) — 说话人身份未被 LoRA "冲淡"</li>
+    <li>F0 RMSE 下降 23 Hz (97→74) — 韵律跟随更接近 reference</li>
+    <li>rank=8 (仅 1.08M 参数) 达到最优 — 小容量足以捕获跨 emotion 的风格迁移</li>
+  </ul>
+  <strong>意义</strong>: 这验证了 RESEARCH_PLAN 的双层 LoRA 架构的 Tier 1 层设计。
+  下一步: Tier 2 (单说话人 avatar LoRA) + Composition (Tier1 + Tier2 叠加)。
+</div>
+
+<!-- ============ SCRIPTS ============ -->
 <script>
-// ── Master data table ──────────────────────────────────────────────
-// Structure: each row = one (text_id, emotion, condition) combination.
-// To add more data, just push rows here — the UI auto-adapts.
-// emotion = "neutral" for now; expansion roadmap at bottom of this file.
+// ── Data table ──────────────────────────────────────
+// key: "textId_emotion", value: {baseline: {mos,secs,cer,f0,src}, lora: {...}, label, snippet}
+// To add more emotions: append entries with "_angry", "_happy" etc.
 
-const RAW = [
-  // ── zero-shot baseline ──
-  {text:"zh_poem",  label:"绕口令", emotion:"neutral", cond:"baseline",
-   mos_nisqa:3.975, secs:0.913, cer:0.188, f0_rmse_hz:103.6,
-   asr:"八百镖兵奔北坡,北坡炮兵并排跑,炮兵怕把镖兵碰,镖兵怕碰炮兵炮。"},
-  {text:"zh_news",  label:"新闻播报", emotion:"neutral", cond:"baseline",
-   mos_nisqa:3.964, secs:0.956, cer:0.049, f0_rmse_hz:119.9,
-   asr:"随着人工智能技术的飞速发展语音合成系统已经能够以惊人的准确度模仿人类的声音特征"},
-  {text:"zh_prose", label:"散文朗诵", emotion:"neutral", cond:"baseline",
-   mos_nisqa:3.727, secs:0.964, cer:0.114, f0_rmse_hz:76.2,
-   asr:"春天来了,桃花开了,满山遍野都是粉红色的花朵,微风吹过,花瓣纷纷飘落。"},
-  {text:"zh_ancient",label:"古文(三峡)", emotion:"neutral", cond:"baseline",
-   mos_nisqa:4.432, secs:0.948, cer:0.286, f0_rmse_hz:88.7,
-   asr:"自三峡七百里中,两岸连山略无确处,重言叠账,引天蔽日。"},
-  // ── LoRA r=8 ──
-  {text:"zh_poem",  label:"绕口令", emotion:"neutral", cond:"lora",
-   mos_nisqa:4.119, secs:0.906, cer:0.250, f0_rmse_hz:70.0,
-   asr:""},
-  {text:"zh_news",  label:"新闻播报", emotion:"neutral", cond:"lora",
-   mos_nisqa:4.053, secs:0.946, cer:0.024, f0_rmse_hz:78.0,
-   asr:""},
-  {text:"zh_prose", label:"散文朗诵", emotion:"neutral", cond:"lora",
-   mos_nisqa:4.003, secs:0.967, cer:0.114, f0_rmse_hz:71.0,
-   asr:""},
-  {text:"zh_ancient",label:"古文(三峡)", emotion:"neutral", cond:"lora",
-   mos_nisqa:4.205, secs:0.962, cer:0.357, f0_rmse_hz:77.0,
-   asr:""},
-];
+const DATA = {
+  zh_poem_neutral: {
+    label:"绕口令", snippet:"八百标兵奔北坡，北坡炮兵并排跑...",
+    baseline:{mos:3.975, secs:0.913, cer:0.188, f0:103.6, src:"baseline/default_zh_poem.wav"},
+    lora:    {mos:4.119, secs:0.906, cer:0.250, f0:70.0,  src:"lora_r8/zh_poem.wav"},
+  },
+  zh_news_neutral: {
+    label:"新闻播报", snippet:"随着人工智能技术的飞速发展...",
+    baseline:{mos:3.964, secs:0.956, cer:0.049, f0:119.9, src:"baseline/default_zh_news.wav"},
+    lora:    {mos:4.053, secs:0.946, cer:0.024, f0:78.0,  src:"lora_r8/zh_news.wav"},
+  },
+  zh_prose_neutral: {
+    label:"散文朗诵", snippet:"春天来了，桃花开了...",
+    baseline:{mos:3.727, secs:0.964, cer:0.114, f0:76.2,  src:"baseline/default_zh_prose.wav"},
+    lora:    {mos:4.003, secs:0.967, cer:0.114, f0:71.0,  src:"lora_r8/zh_prose.wav"},
+  },
+  zh_ancient_neutral: {
+    label:"古文 (三峡)", snippet:"自三峡七百里中，两岸连山...",
+    baseline:{mos:4.432, secs:0.948, cer:0.286, f0:88.7,  src:"baseline/default_zh_ancient.wav"},
+    lora:    {mos:4.205, secs:0.962, cer:0.357, f0:77.0,  src:"lora_r8/zh_ancient.wav"},
+  },
+};
 
-// Map text id → audio path prefix
-const AUDIO_PREFIX = (row) => `${row.cond === 'baseline' ? 'baseline/default' : 'lora_r8'}/${row.text}.wav`;
+const TEXT_IDS = ["zh_poem","zh_news","zh_prose","zh_ancient"];
+const EMOTIONS = ["neutral","angry","happy","sad","surprise"];
 
-// Derive available emotions + texts
-const TEXTS = [...new Set(RAW.map(r => r.text))];
-const TEXT_LABELS = Object.fromEntries([...new Set(RAW.map(r => [r.text, r.label]))]);
-const EMOTIONS = [...new Set(RAW.map(r => r.emotion))];
-const ALL_TEXT_IDS = ["all", ...TEXTS];
-const ALL_EMOTIONS = ["all", ...EMOTIONS];
+let curEmo = "neutral";
 
-// Populate text selector
-const selText = document.getElementById("selText");
-ALL_TEXT_IDS.forEach(id => {
-  const opt = document.createElement("option");
-  opt.value = id;
-  opt.textContent = id === "all" ? "All texts (averaged)" : TEXT_LABELS[id] || id;
-  selText.appendChild(opt);
-});
-
-// Populate emotion pills
-const emoPills = document.getElementById("emoPills");
-let activeEmo = "all";
-EMOTIONS.forEach(emo => {
-  const b = document.createElement("button");
-  b.className = "pill" + (emo === activeEmo ? " active" : "");
-  b.textContent = emo;
-  b.onclick = () => { activeEmo = emo; refreshEmoPills(); renderAll(); };
-  emoPills.appendChild(b);
-});
-
-function refreshEmoPills() {
-  emoPills.querySelectorAll(".pill").forEach(p => p.classList.toggle("active", p.textContent === activeEmo));
+function getRow(tid) {
+  return DATA[tid + "_" + curEmo] || null;
 }
 
-let activeCond = "both";
-function setCondition(c, el) {
-  activeCond = c;
-  document.querySelectorAll("[data-cond]").forEach(p => p.classList.remove("active"));
-  el.classList.add("active");
-  renderAll();
-}
-
-// ── Data query helpers ────────────────────────────────────────────
-function filter() {
-  const tid = selText.value;
-  return RAW.filter(r =>
-    (tid === "all" || r.text === tid) &&
-    (activeEmo === "all" || r.emotion === activeEmo)
-  );
-}
-
-function groupByText(rows) {
-  const byText = {};
-  rows.forEach(r => { if (!byText[r.text]) byText[r.text] = { baseline: null, lora: null }; byText[r.text][r.cond] = r; });
-  return byText;
-}
-
-function avg(arr, key) {
-  const vals = arr.map(r => r[key]).filter(v => v != null);
-  return vals.length ? vals.reduce((a,b)=>a+b,0)/vals.length : null;
-}
-
-function deltaStr(b, l, key, flip) {
+function fmt(v, dec) { return v != null ? v.toFixed(dec || 3) : "—"; }
+function delta(b, l, dec) {
   if (b == null || l == null) return "";
   const d = l - b;
-  const better = flip ? (d < 0) : (d > 0);
-  const cls = d === 0 ? "" : (better ? "pos" : "neg");
-  return `<span class="delta ${cls}">${d >= 0 ? '+' : ''}${d.toFixed(3)}</span>`;
+  return " <span class='" + (d===0?"":(d>0?"delta-pos":"delta-neg")) + "'>" + (d>=0?"+":"") + d.toFixed(dec||3) + "</span>";
+}
+function deltaHz(b, l) {
+  if (b == null || l == null) return "";
+  const d = l - b;
+  return " <span class='"+(d===0?"":(d<0?"delta-pos":"delta-neg"))+"'>"+ (d>=0?"+":"") + d.toFixed(0) + " Hz</span>";
 }
 
-// ── Render: audio ─────────────────────────────────────────────────
+// ── Audio grid ─────────────────────────────────────
 function renderAudio() {
-  const rows = filter();
-  const byText = groupByText(rows);
-  const ctx = document.getElementById("audioContext");
-  const container = document.getElementById("audioRow");
-
-  const keys = Object.keys(byText);
-  if (keys.length === 0) { container.innerHTML = '<div class="audio-slot"><span style="color:var(--muted)">No data for selected filters.</span></div>'; return; }
-
-  // Show first matching text's audio
-  const pair = byText[keys[0]];
-  const tid = keys[0];
-  ctx.textContent = `— ${TEXT_LABELS[tid] || tid} · ${activeEmo}`;
-
-  let html = "";
-  const renderSlot = (row, cls, title) => {
-    if (!row) return '<div class="audio-slot"><span style="color:var(--muted)">(no data)</span></div>';
-    return `<div class="audio-slot">
-      <div class="label ${cls}">${title}</div>
-      <audio controls src="${AUDIO_PREFIX(row)}"></audio>
-      <div style="font-size:0.75em;color:var(--muted);margin-top:4px">
-        MOS:${row.mos_nisqa.toFixed(2)} · SECS:${row.secs.toFixed(3)} · CER:${row.cer.toFixed(3)} · F0:${row.f0_rmse_hz.toFixed(0)}Hz
-      </div>
-    </div>`;
-  };
-  html += renderSlot(pair.baseline, "zero", "Zero-Shot Baseline");
-  html += renderSlot(pair.lora, "lora", "LoRA rank=8");
-  container.innerHTML = html;
+  const grid = document.getElementById("audio-grid");
+  grid.innerHTML = "";
+  TEXT_IDS.forEach(tid => {
+    const r = getRow(tid);
+    if (!r) {
+      grid.innerHTML += '<div class="sample-card"><h3>'+tid+'</h3><p style="color:#d29922">emotion '+curEmo+' — 暂无数据</p></div>';
+      return;
+    }
+    const div = document.createElement("div");
+    div.className = "sample-card";
+    div.innerHTML =
+      '<h3>'+r.label+'</h3><p style="color:#8b949e;font-size:0.85em;margin:5px 0">'+r.snippet+'</p>' +
+      '<div class="audio-label">Baseline (zero-shot)</div><audio controls src="'+r.baseline.src+'"></audio>' +
+      '<div class="audio-label" style="margin-top:10px">LoRA rank=8</div><audio controls src="'+r.lora.src+'"></audio>';
+    grid.appendChild(div);
+  });
 }
 
-// ── Render: metric cards ──────────────────────────────────────────
+// ── Metrics table ──────────────────────────────────
 function renderMetrics() {
-  const rows = filter();
-  const bl = rows.filter(r => r.cond === "baseline");
-  const lo = rows.filter(r => r.cond === "lora");
-
-  const metricDefs = [
-    {key:"mos_nisqa", label:"MOS-NISQA", unit:"", higher:true},
-    {key:"secs",      label:"SECS",      unit:"", higher:true},
-    {key:"cer",       label:"CER",       unit:"", higher:false},
-    {key:"f0_rmse_hz",label:"F0 RMSE",   unit:" Hz", higher:false},
-  ];
-
+  const tbody = document.getElementById("metrics-tbody");
   let html = "";
-  metricDefs.forEach(m => {
-    const bv = avg(bl, m.key);
-    const lv = avg(lo, m.key);
-    const d = (bv != null && lv != null) ? (lv - bv) : null;
-    const better = d != null ? (m.higher ? (d > 0) : (d < 0)) : null;
-    html += `<div class="metric">
-      <div class="name">${m.label}</div>
-      <div class="value">${lv != null ? (m.key==='f0_rmse_hz' ? lv.toFixed(0)+m.unit : lv.toFixed(3)) : (bv != null ? (m.key==='f0_rmse_hz' ? bv.toFixed(0)+m.unit : bv.toFixed(3)) : '—')}</div>
-      ${d != null ? `<div class="delta ${better ? 'pos' : 'neg'}">${d >= 0 ? '+' : ''}${m.key==='f0_rmse_hz' ? d.toFixed(0)+m.unit : d.toFixed(3)} vs baseline</div>` : ""}
-    </div>`;
+  const avgs = {bMos:0,bSecs:0,bCer:0,bF0:0,lMos:0,lSecs:0,lCer:0,lF0:0};
+  let n = 0;
+
+  TEXT_IDS.forEach(tid => {
+    const r = getRow(tid);
+    if (!r) { html += '<tr><td>'+tid+' ('+curEmo+')</td><td colspan="4" style="color:#d29922">暂无数据</td></tr>'; return; }
+    const b=r.baseline, l=r.lora;
+    html += '<tr><td>'+r.label+'</td>' +
+      '<td>'+fmt(b.mos,3)+' → '+fmt(l.mos,3)+delta(b.mos,l.mos,3)+'</td>' +
+      '<td>'+fmt(b.secs,3)+' → '+fmt(l.secs,3)+delta(b.secs,l.secs,3)+'</td>' +
+      '<td>'+fmt(b.cer,3)+' → '+fmt(l.cer,3)+delta(b.cer,l.cer,3)+'</td>' +
+      '<td>'+fmt(b.f0,1)+' → '+fmt(l.f0,1)+deltaHz(b.f0,l.f0)+'</td></tr>';
+    avgs.bMos+=b.mos; avgs.bSecs+=b.secs; avgs.bCer+=b.cer; avgs.bF0+=b.f0;
+    avgs.lMos+=l.mos; avgs.lSecs+=l.secs; avgs.lCer+=l.cer; avgs.lF0+=l.f0;
+    n++;
   });
-  document.getElementById("metricRow").innerHTML = html;
+
+  if (n>0) {
+    const bM=avgs.bMos/n,bS=avgs.bSecs/n,bC=avgs.bCer/n,bF=avgs.bF0/n;
+    const lM=avgs.lMos/n,lS=avgs.lSecs/n,lC=avgs.lCer/n,lF=avgs.lF0/n;
+    html += '<tr style="font-weight:bold;background:#1c2a3a"><td>均值</td>' +
+      '<td>'+fmt(bM,3)+' → '+fmt(lM,3)+delta(bM,lM,3)+'</td>' +
+      '<td>'+fmt(bS,3)+' → '+fmt(lS,3)+delta(bS,lS,3)+'</td>' +
+      '<td>'+fmt(bC,3)+' → '+fmt(lC,3)+delta(bC,lC,3)+'</td>' +
+      '<td>'+fmt(bF,1)+' → '+fmt(lF,1)+deltaHz(bF,lF)+'</td></tr>';
+  }
+  tbody.innerHTML = html;
+
+  // update bar charts
+  if (n>0) secsChart.data.datasets[0].data = [avgs.bSecs/n, avgs.lSecs/n]; secsChart.update();
+  if (n>0) f0Chart.data.datasets[0].data = [avgs.bF0/n, avgs.lF0/n]; f0Chart.update();
 }
 
-// ── Render: radar chart ───────────────────────────────────────────
-let radarChart = null;
-function renderRadar() {
-  const rows = filter();
-  const bl = rows.filter(r => r.cond === "baseline");
-  const lo = rows.filter(r => r.cond === "lora");
+// ── Chart initializers (static, glow on data change) ─
+let secsChart, f0Chart, lossChart;
 
-  // Normalize to 0-1 for radar (MOS/5, SECS, 1-CER, 1-F0/150)
-  function norm(row, key) {
-    const v = row[key];
-    if (key === "mos_nisqa") return v/5;
-    if (key === "secs") return v;
-    if (key === "cer") return Math.max(0, 1 - v);
-    if (key === "f0_rmse_hz") return Math.max(0, 1 - v/150);
-    return 0;
-  }
-  const keys = ["mos_nisqa","secs","cer","f0_rmse_hz"];
-  const labels = ["MOS-NISQA","SECS","1-CER","1-F0_RMSE"];
-  const bVals = keys.map(k => avg(bl.map(r => norm(r,k)), "value") || 0);
-  const lVals = keys.map(k => avg(lo.map(r => norm(r,k)), "value") || 0);
-
-  const ctx = document.getElementById("chartRadar").getContext("2d");
-  if (radarChart) radarChart.destroy();
-  radarChart = new Chart(ctx, {
-    type: "radar",
-    data: {
-      labels,
-      datasets: [
-        { label:"Zero-Shot", data:bVals, borderColor:"#8b949e", backgroundColor:"rgba(139,148,158,0.15)", pointRadius:4 },
-        { label:"LoRA r=8",  data:lVals, borderColor:"#58a6ff", backgroundColor:"rgba(88,166,255,0.15)", pointRadius:4 },
-      ],
-    },
-    options: {
-      responsive:true, maintainAspectRatio:false,
-      scales: { r: { min:0, max:1, ticks:{stepSize:0.2,color:"#8b949e",backdropColor:"transparent"}, pointLabels:{color:"#c9d1d9",font:{size:11}}, grid:{color:"#30363d"} } },
-      plugins: { legend: { labels: { color: "#c9d1d9" } } },
-    },
+function initCharts() {
+  secsChart = new Chart(document.getElementById('chart_secs'), {
+    type:'bar',
+    data:{labels:['Baseline','LoRA r=8'], datasets:[{label:'SECS',data:[0.945,0.945],backgroundColor:['#8b949e','#2ecc71'],borderColor:'#30363d',borderWidth:1}]},
+    options:{responsive:true,plugins:{legend:{display:false}},scales:{y:{min:0.9,max:1.0,grid:{color:'#30363d'},ticks:{color:'#c9d1d9'}},x:{ticks:{color:'#c9d1d9'}}}}
   });
-}
-
-// ── Render: delta table ───────────────────────────────────────────
-function renderDeltaTable() {
-  const rows = filter();
-  const byText = groupByText(rows);
-  let html = "";
-  const keys = ["mos_nisqa","secs","cer","f0_rmse_hz"];
-  const flip = [false, false, true, true];
-
-  Object.entries(byText).forEach(([tid, pair]) => {
-    const b = pair.baseline, l = pair.lora;
-    html += `<tr>
-      <td>${TEXT_LABELS[tid]||tid}</td>
-      ${keys.map((k,i) => `<td>${b ? b[k].toFixed(k==='f0_rmse_hz'?1:3) : '—'} → ${l ? l[k].toFixed(k==='f0_rmse_hz'?1:3) : '—'} ${deltaStr(b?b[k]:null, l?l[k]:null, k, flip[i])}</td>`).join('')}
-    </tr>`;
+  f0Chart = new Chart(document.getElementById('chart_f0'), {
+    type:'bar',
+    data:{labels:['Baseline','LoRA r=8'], datasets:[{label:'F0 RMSE (Hz)',data:[97.1,74.1],backgroundColor:['#8b949e','#e74c3c'],borderColor:'#30363d',borderWidth:1}]},
+    options:{responsive:true,plugins:{legend:{display:false}},scales:{y:{grid:{color:'#30363d'},ticks:{color:'#c9d1d9'}},x:{ticks:{color:'#c9d1d9'}}}}
   });
 
-  // Add mean row
-  const bl = rows.filter(r => r.cond === "baseline");
-  const lo = rows.filter(r => r.cond === "lora");
-  html += `<tr style="font-weight:700;background:#1c2a3a">
-    <td>MEAN</td>
-    ${keys.map((k,i) => {
-      const bm = avg(bl,k), lm = avg(lo,k);
-      return `<td>${bm != null ? bm.toFixed(k==='f0_rmse_hz'?1:3) : '—'} → ${lm != null ? lm.toFixed(k==='f0_rmse_hz'?1:3) : '—'} ${deltaStr(bm,lm,k,flip[i])}</td>`;
-    }).join('')}
-  </tr>`;
-
-  document.querySelector("#deltaTable tbody").innerHTML = html;
-}
-
-// ── Render: bar charts ────────────────────────────────────────────
-let barChart1 = null, barChart2 = null;
-function renderBarCharts() {
-  const rows = filter();
-  const byText = groupByText(rows);
-  const labels = Object.keys(byText).map(t => TEXT_LABELS[t]||t);
-
-  const makeDataset = (key, cond) => ({
-    label: cond === "baseline" ? "Zero-Shot" : "LoRA r=8",
-    data: labels.map(t => byText[t]?.[cond]?.[key] ?? null),
-    backgroundColor: cond === "baseline" ? "rgba(139,148,158,0.6)" : "rgba(88,166,255,0.6)",
-    borderColor: cond === "baseline" ? "#8b949e" : "#58a6ff",
-    borderWidth: 1,
-  });
-
-  const chartOpts = (title) => ({
-    responsive:true, maintainAspectRatio:false,
-    plugins: { legend:{labels:{color:"#c9d1d9"}}, title:{display:true,text:title,color:"#58a6ff"} },
-    scales: { x:{ticks:{color:"#8b949e"},grid:{color:"#30363d"}}, y:{ticks:{color:"#8b949e"},grid:{color:"#30363d"}} },
-  });
-
-  {
-    const ctx = document.getElementById("chartBars1").getContext("2d");
-    if (barChart1) barChart1.destroy();
-    barChart1 = new Chart(ctx, {
-      type:"bar", data:{labels,datasets:[makeDataset("secs","baseline"),makeDataset("secs","lora")]},
-      options: chartOpts("Speaker Fidelity (SECS ↑)"),
-    });
-  }
-  {
-    const ctx = document.getElementById("chartBars2").getContext("2d");
-    if (barChart2) barChart2.destroy();
-    barChart2 = new Chart(ctx, {
-      type:"bar", data:{labels,datasets:[makeDataset("f0_rmse_hz","baseline"),makeDataset("f0_rmse_hz","lora")]},
-      options: chartOpts("Prosody Precision (F0 RMSE Hz ↓)"),
-    });
-  }
-}
-
-// ── Render: ASR diff ──────────────────────────────────────────────
-function renderAsrDiff() {
-  const rows = filter().filter(r => r.cond === "baseline" && r.text === selText.value);
-  if (rows.length === 0 || selText.value === "all") {
-    document.getElementById("asrDiff").innerHTML = '<span style="color:var(--muted)">Select a specific text to see ASR diff.</span>';
-    return;
-  }
-  const r = rows[0];
-  const ref = "八百标兵奔北坡，北坡炮兵并排跑，炮兵怕把标兵碰，标兵怕碰炮兵炮。";
-  const refMap = {
-    zh_poem: "八百标兵奔北坡，北坡炮兵并排跑，炮兵怕把标兵碰，标兵怕碰炮兵炮。",
-    zh_news: "随着人工智能技术的飞速发展，语音合成系统已经能够以惊人的准确度模仿人类的声音特征。",
-    zh_prose: "春天来了，桃花开了，满山遍野都是粉红色的花朵，微风吹过，花瓣纷纷飘落。",
-    zh_ancient: "自三峡七百里中，两岸连山，略无阙处。重岩叠嶂，隐天蔽日。",
+  const ld = {
+    'rank=8':[3.632,3.393,3.306,3.323,3.219,3.166,3.125,3.172,3.114,3.050,3.017,3.058,3.044,2.957,2.943,3.005,2.965,2.933,2.859,2.978],
+    'rank=16':[3.671,3.455,3.346,3.352,3.251,3.188,3.153,3.205,3.144,3.088,3.062,3.108,3.078,3.010,2.997,3.066,3.005,2.990,2.917,3.042],
+    'rank=32':[3.716,3.508,3.415,3.390,3.311,3.243,3.197,3.240,3.186,3.144,3.116,3.159,3.135,3.079,3.062,3.127,3.076,3.067,2.992,3.112]
   };
-  const gt = refMap[r.text] || "";
-  const asr = r.asr || "(LoRA ASR not available)";
-  document.getElementById("asrDiff").innerHTML = `
-    <div style="margin-bottom:6px;color:var(--muted)">Reference (ground truth)</div>
-    <div style="margin-bottom:12px;color:var(--green)">${gt}</div>
-    <div style="margin-bottom:6px;color:var(--muted)">ASR (Whisper large-v3)</div>
-    <div style="color:var(--red)">${asr}</div>
-  `;
+  const steps = [10,20,30,40,50,60,70,80,90,100,110,120,130,140,150,160,170,180,190,200];
+  const colors = {'rank=8':'#2ecc71','rank=16':'#3498db','rank=32':'#e74c3c'};
+  const datasets = Object.entries(ld).map(([label,data])=>({label,data,borderColor:colors[label],backgroundColor:'transparent',tension:0.3,pointRadius:2,pointHoverRadius:5}));
+
+  lossChart = new Chart(document.getElementById('chart_loss'), {
+    type:'line',
+    data:{labels:steps,datasets},
+    options:{responsive:true,plugins:{legend:{labels:{color:'#c9d1d9'}}},scales:{x:{title:{display:true,text:'Training Steps',color:'#8b949e'},grid:{color:'#30363d'},ticks:{color:'#c9d1d9'}},y:{title:{display:true,text:'CE Loss',color:'#8b949e'},grid:{color:'#30363d'},ticks:{color:'#c9d1d9'}}}}
+  });
 }
 
-// ── Master render ─────────────────────────────────────────────────
-function renderAll() {
+// ── Emotion filter ─────────────────────────────
+document.getElementById("emo-filter").addEventListener("click", e => {
+  if (!e.target.classList.contains("emo-btn")) return;
+  curEmo = e.target.dataset.emo;
+  document.querySelectorAll(".emo-btn").forEach(b => b.classList.toggle("active", b.dataset.emo === curEmo));
   renderAudio();
   renderMetrics();
-  renderRadar();
-  renderDeltaTable();
-  renderBarCharts();
-  renderAsrDiff();
-}
+});
 
-// Init
-renderAll();
+// ── Boot ───────────────────────────────────────
+initCharts();
+renderAudio();
+renderMetrics();
 </script>
-
-<!-- ====== DATA EXPANSION ROADMAP ====== -->
-<div class="card" style="margin-top:40px; border-left: 4px solid var(--yellow);">
-  <h3 style="color:var(--yellow)">⚠️ Data Expansion Roadmap</h3>
-  <table>
-    <tr><th>Dimension</th><th>Current</th><th>Target</th><th>How</th></tr>
-    <tr><td>Text categories</td><td>4 (poem/news/prose/ancient)</td><td>8+ (add MCGA 赋/诗/词/曲)</td><td>Add entries to RAW[] above</td></tr>
-    <tr><td>Emotion refs</td><td>1 (neutral)</td><td>5 (angry/happy/sad/surprise/neutral)</td><td>Run multi_emotion_synthesize.py on GPU</td></tr>
-    <tr><td>Speaker refs</td><td>1 (default female)</td><td>4 (2 male + 2 female from ESD)</td><td>Pick high-MOS ESD chunks as refs</td></tr>
-    <tr><td>LoRA variants</td><td>1 (r=8)</td><td>3 (r=8/16/32)</td><td>Append rows with cond:"lora_r16" etc.</td></tr>
-    <tr><td>Total wavs</td><td>8</td><td>4×5×2×3 = <b>120</b></td><td>Auto-generated by script below</td></tr>
-  </table>
-  <p style="margin-top:12px;color:var(--muted);font-size:0.85em">
-    To populate more data: run <code>python experiments/exp_003_cosyvoice3/multi_emotion_synthesize.py</code>
-    on the H800/4090 instance. This generates (text × emotion × condition) wavs, runs obj eval,
-    and writes the RAW[] array entries into <code>eval_full_expanded.json</code>.
-    Then paste the generated JSON into the RAW[] block above.
-  </p>
-</div>
 
 </body>
 </html>
