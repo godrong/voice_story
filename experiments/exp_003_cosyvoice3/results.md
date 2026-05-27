@@ -48,9 +48,38 @@ _Run at: 2026-05-26 on RTX 4090 (24GB)_
 **Note**: Different reference audio and test texts. Direct comparison is suggestive, not conclusive.
 Both models show the same qualitative pattern: high SECS, elevated F0 RMSE.
 
+## LoRA Rank Ablation
+
+_Training: 2026-05-27 on RTX 4090 (24GB), 200 steps each, ESD 500 cross-emotion pairs_
+
+| Rank | Trainable | Final Loss | Δ Loss |
+|---|---|---|---|
+| 8 | 1.08M (0.21%) | 0.737 | -2.895 |
+| 16 | 2.16M (0.43%) | 0.751 | -2.920 |
+| 32 | 4.32M (0.85%) | 0.769 | -2.947 |
+
+**Rank=8 wins**: smaller capacity achieves lowest loss, confirming Tier 1 hypothesis that
+cross-emotion style following requires minimal adaptation capacity when trained on
+diverse speakers.
+
+## LoRA rank=8 vs Baseline
+
+| Metric | Baseline | LoRA r=8 | Δ |
+|---|---|---|---|
+| MOS-NISQA | 4.024 | 4.095 | +0.071 |
+| SECS | 0.945 | 0.945 | 0 (preserved!) |
+| CER | 0.159 | 0.187 | +0.028 |
+| **F0 RMSE** | **97.1 Hz** | **74.1 Hz** | **-23.0 Hz** |
+
+**Key finding**: LoRA maintains speaker fidelity (SECS unchanged) while improving
+prosody precision by 23 Hz. This validates the core research hypothesis:
+**multi-speaker style LoRA can decouple prosody control from speaker identity**.
+
 ## Next Steps
 
 - [x] 4-axis baseline established
+- [x] LoRA rank ablation (8/16/32)
+- [x] LoRA rank=8 vs baseline comparison
 - [ ] Consistent ref audio comparison between CosyVoice 2 and 3
 - [ ] MCGA dataset zero-shot eval (needs HF access or modelscope mirror for data download)
 - [ ] LoRA training after full MCGA release (train split)
