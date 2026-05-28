@@ -13,12 +13,13 @@
 
 在 [exp_002](../experiments/exp_002_ref_and_instruct/eval_objective.md) 中通过 4 维客观评测发现：CosyVoice 2 的 instruct mode 在保持自然度（MOS、WER 几乎不变）的同时，**牺牲了说话人音色保真（SECS -0.13）和韵律拟合（F0 RMSE +21 Hz）**。这暴露了一个具体的架构问题——**风格条件信号与说话人条件信号在模型内部互相干扰**。
 
-本研究计划聚焦两个可量化目标，都直接对标 CosyVoice 官方数据和局限性：
+本研究计划聚焦三个可量化目标：
 
 1. **instruct ΔSS** — 解决官方承认的"cannot control timbre through textual instructions"
 2. **中文 WER 修复** — 修复 v3 官方 benchmark 里的中文可懂度退化 (12.58→14.15)
+3. **Semantic Leakage** — **2026-05-28 新发现**：CosyVoice 3 zero-shot 在特定情绪 ref 上存在 semantic leakage（ref 文本内容污染合成输出），非 LoRA 引入，属基座模型 conditioning 缺陷
 
-通过**多说话人 style LoRA** 在 ESD (20 spk × 5 emotion) + AISHELL-3 (218 spk) 上训练，用中英混合 + style-balanced batch 同时处理两个目标。所有改进用独立 4 维 eval framework (NISQA/SECS/WER/F0) 量化。
+通过**多说话人 style LoRA** 在 ESD (20 spk × 5 emotion) + AISHELL-3 (218 spk) 上训练，用中英混合 + style-balanced batch 同时处理三个目标。所有改进用独立 eval framework (NISQA/SECS/WER/F0/SLR) 量化。
 
 ---
 
@@ -71,6 +72,30 @@
 | "念错了" | WER | ❌ 无明显变化 |
 | **"不像 Trump 了"** | **SECS** | ✓ -0.13 |
 | **"语调不对了"** | **F0 RMSE** | ✓ +21 Hz |
+
+### 1.5 新发现：Semantic Leakage（2026-05-28）
+
+在 [exp_003 多情感评测](experiments/exp_003_cosyvoice3/outputs/report.html) 中发现了一个**独立于 LoRA 的基座模型缺陷**：
+
+**现象**：CosyVoice 3 zero-shot 在 Sad/Angry 等情绪 ref 上，ref 音频的原始文本内容会**污染合成输出**。
+
+```
+ref 原文: "所以他申请转调..."
+target:   "春天来了，桃花开了，满山遍野都是粉红色的花朵..."
+
+合成 ASR: "所以 她 申 请 转 掉 春天 来 了 桃 花 开 了..."
+          ^^^^^^^^^^^^^^^^   ref 文本泄露
+```
+
+**证据**：
+- 三条独立 target text 全部出现同一种泄露模式（不是巧合）
+- Zero-shot 和 LoRA 均有此现象 → **不是 LoRA 过拟合**
+- Sad 情绪触发概率最高（3/4），Angry 次之（2/4），Happy/Neutral 最少
+- MOS-NISQA 给 Sad 打分 4.8-5.0（失误地认为"像真人"），但语义完全错
+
+**根因推断**：CosyVoice 3 的 zero-shot 机制将 ref audio 编码为 speech tokens 后直接条件 LLM。这些 tokens 同时编码了"说话方式"（风格/韵律）和"说了什么"（语义内容）。当 ref 的情绪特征与 neutral 差异大时，模型无法从 token 序列中分离出纯风格信号——部分语义 token 被当成"这是这个人的说话特征"泄漏进生成。
+
+**与目标 #1 的关系**：两者都指向同一个深层问题——**CosyVoice 的 conditioning 机制缺乏 speaker/style/content 三者的显式解耦**。目标 #1 是"加了 style 指令后 speaker 丢"，本发现是"带了 style 的 ref 后 content 漏"。
 
 → **真正失败的轴是说话人保真 + 韵律拟合，不是自然度**。
 
@@ -136,6 +161,7 @@
 | 英文 WER | 9.04 | 保持不变 | > 10.0 | 不破坏已改进项 |
 | 英文 SS (zero_shot) | 75.9 | 保持 | < 73.0 | 不破坏 v3 提升 |
 | 中文 SS (zero_shot) | 78.6 | 保持 | < 76.0 | 同上 |
+| **Semantic Leakage Rate (Sad)** | **~0.5 (exp_003 估算)** | **≤ 0.15** | > 0.3 | 基座缺陷，#3 |
 
 **注意**：Tier 2 (avatar LoRA) 已从研究计划移除——属商业产品线 (Line B)，不适合当前求职导向。见 [memory: project_avatar_lora_shelved](../.claude/projects/-Users-attention-Documents-projects-voice-story/memory/project_avatar_lora_shelved.md)。
 
@@ -217,6 +243,31 @@
 | **rank 4 vs 8 vs 16 vs 32** | 找到性价比 sweet spot |
 | **target_modules qv vs qkvo vs qkvo+mlp** | attention-only vs 加 FFN |
 | **ESD only vs ESD+AISHELL-3** | 验证 speaker 多样性的重要性 |
+
+### 3.4 子问题 4：Semantic Leakage（P0 发现，解决方式取决于定位）
+
+**发现级别**：基座模型缺陷，非 LoRA 引入。
+
+**评测指标**：新增 Semantic Leakage Rate (SLR)
+- 对每条合成跑 ASR，算 ASR 文本与 ref_text 的 BLEU-1 / ROUGE-L
+- SLR = 0 表示完全不泄露，SLR > 0.3 表示严重泄露
+- Sad baseline SLR ≈ 0.4-0.6（需要精确计算）
+
+**解决路线（按可行性排序）**：
+
+| 方案 | 描述 | 工作量 | 科研价值 |
+|---|---|---|---|
+| **A. Inference-time Negative Prompt** | 推理时将 ref_text 作为"禁止生成"的负向 token 传入 LLM decoder（类似 LLM 的 negative prompt） | 1 周 | ⭐⭐ |
+| **B. Content-Masked Speech Tokens** | 在 speech tokenizer 输出端加一个轻量 content filter——用 ref_text 的 token 位置 mask 掉对应 speech token，强制模型从 speaker embedding 获取风格 | 2-3 周 | ⭐⭐⭐ |
+| **C. Disentangled Ref Encoding** | 拆分 ref 处理为两条独立路径：(a) speaker identity via WavLM embedding, (b) prosody via 内容无关的韵律 encoder（F0 contour + energy + duration，不含 phoneme） | 4-6 周 | ⭐⭐⭐⭐⭐ |
+| **D. Adversarial Content Removal** | 训练一个辅助分类器从 speech tokens 预测 ref text，主模型通过梯度反转学习欺骗分类器——强制 speech tokens 忘记语义 | 4-6 周 | ⭐⭐⭐⭐ |
+| **E. Data-side: Contrastive Pairs** | 在 Tier 1 LoRA 训练数据中加入"同风格不同内容"的 contrastive pair，让模型显式学到 style ≠ content | 1 周（数据准备） | ⭐⭐ |
+
+**推荐**：
+- **求职项目**：A（快速 demo）+ E（数据侧验证）+ B（核心贡献）。A 让面试时能 demo 修复，B 展示你理解了 tokenization 层的根因
+- **Paper**：C 或 D。Disentangled conditioning 是 TTS 社区正在攻的方向，且 CosyVoice 3 官方未触碰
+
+**与目标 #1 的统一**：SLR 和 instruct ΔSS 是同一个深层问题（conditioning 无解耦）的两种表现。任何解了 semantic leakage 的方案，大概率同时改善 instruct ΔSS——因为它们都在修 "model confuses style signal with content/speaker signal"。
 
 ### 3.3 子问题 3：跨架构泛化（P3: optional，求职亮点）
 
