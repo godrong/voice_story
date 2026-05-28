@@ -73,31 +73,60 @@
 | **"不像 Trump 了"** | **SECS** | ✓ -0.13 |
 | **"语调不对了"** | **F0 RMSE** | ✓ +21 Hz |
 
-### 1.5 新发现：Semantic Leakage（2026-05-28）
+### 1.5 新发现：Semantic Leakage + 根因定位实验（2026-05-28）
 
-在 [exp_003 多情感评测](experiments/exp_003_cosyvoice3/outputs/report.html) 中发现了一个**独立于 LoRA 的基座模型缺陷**：
+在 [exp_003 多情感评测](experiments/exp_003_cosyvoice3/outputs/report.html) 中发现了一个**独立于 LoRA 的基座模型缺陷**。
 
-**现象**：CosyVoice 3 zero-shot 在 Sad/Angry 等情绪 ref 上，ref 音频的原始文本内容会**污染合成输出**。
+#### 1.5.1 现象
+
+CosyVoice 3 zero-shot 在特定情绪 ref 上，ref 音频的原始文本内容会**污染合成输出**。
 
 ```
-ref 原文: "所以他申请转调..."
-target:   "春天来了，桃花开了，满山遍野都是粉红色的花朵..."
+ref 原文: "她和维克分手了，所以她申请转调。"
+target:   "春天来了，桃花开了..."
 
-合成 ASR: "所以 她 申 请 转 掉 春天 来 了 桃 花 开 了..."
+合成 ASR: "所以 他 申 请 转 调 春天 来 了 桃 花 开 了..."
           ^^^^^^^^^^^^^^^^   ref 文本泄露
 ```
 
-**证据**：
-- 三条独立 target text 全部出现同一种泄露模式（不是巧合）
-- Zero-shot 和 LoRA 均有此现象 → **不是 LoRA 过拟合**
-- Sad 情绪触发概率最高（3/4），Angry 次之（2/4），Happy/Neutral 最少
-- MOS-NISQA 给 Sad 打分 4.8-5.0（失误地认为"像真人"），但语义完全错
+#### 1.5.2 泄漏源定位实验（Approach B 证伪 + C probe）
 
-**根因推断**：CosyVoice 3 的 zero-shot 机制将 ref audio 编码为 speech tokens 后直接条件 LLM。这些 tokens 同时编码了"说话方式"（风格/韵律）和"说了什么"（语义内容）。当 ref 的情绪特征与 neutral 差异大时，模型无法从 token 序列中分离出纯风格信号——部分语义 token 被当成"这是这个人的说话特征"泄漏进生成。
+**实验设计**：在同一个 Sad ref 上跑三组对照——正常 / speech token 置零 / speech token + speaker embedding 都置零。
 
-**与目标 #1 的关系**：两者都指向同一个深层问题——**CosyVoice 的 conditioning 机制缺乏 speaker/style/content 三者的显式解耦**。目标 #1 是"加了 style 指令后 speaker 丢"，本发现是"带了 style 的 ref 后 content 漏"。
+| 条件 | zh_poem SLR | zh_news SLR | zh_prose SLR | 解读 |
+|---|---|---|---|---|
+| normal (完整条件) | 0.000 | 0.152 | 0.222 | 基准——部分泄漏 |
+| **zero_st** (speech token→0) | 0.000 | 0.241 | **0.071** | 不一致——有时改善有时恶化 |
+| **zero_st+spk_emb** (全零) | **0.289** | 0.241 | **0.406** | **最差——泄漏加剧** |
 
-→ **真正失败的轴是说话人保真 + 韵律拟合，不是自然度**。
+**三个结论**：
+
+1. **方案 B（Content-Masked Speech Tokens）被证伪**
+   - Mask 掉 86% speech token 后 SLR **上升**（0.04→0.18），而非下降
+   - 原因：mask 掉韵律信息后模型退化到 speaker embedding，embedding 携带更强的语义偏差
+   - 结论：**speech token 不是唯一的泄漏源，甚至不是主要泄漏源**
+
+2. **Speaker embedding 是更强的泄漏源**
+   - zero_st+spk_emb 的 SLR 最高（0.29-0.40）
+   - CAM++ 从 5s Sad 音频提取的 192-dim 向量编码了太多语义信息
+   - 当 speaker embedding 也被置零时，模型无法区分"谁在说话"和"说了什么"
+
+3. **模型不需要 speech token 就能生成可懂语音**
+   - zero_st 下的输出仍然是可懂中文（"乃标兵奔北坡..."）
+   - 证明 prosody-only conditioning 在架构上是可行的
+
+#### 1.5.3 修正后的根因
+
+CosyVoice 3 的 conditioning 机制有**两个泄漏源**：
+
+```
+CAM++ embedding (192-dim) ──→ 携带了 speaker identity + 部分语义
+Speech tokens (139 tokens) ──→ 携带了 prosody + 剩余语义
+                    ↑
+              两者互有重叠，模型分不开
+```
+
+**与目标 #1 的关系**：三个目标指向同一个深层问题——**CosyVoice 的 conditioning 机制缺乏 speaker/style/content 三者的显式解耦**。
 
 ---
 
@@ -244,30 +273,52 @@ target:   "春天来了，桃花开了，满山遍野都是粉红色的花朵...
 | **target_modules qv vs qkvo vs qkvo+mlp** | attention-only vs 加 FFN |
 | **ESD only vs ESD+AISHELL-3** | 验证 speaker 多样性的重要性 |
 
-### 3.4 子问题 4：Semantic Leakage（P0 发现，解决方式取决于定位）
+### 3.4 子问题 4：Semantic Leakage — 证伪 B，修正 C
 
 **发现级别**：基座模型缺陷，非 LoRA 引入。
 
 **评测指标**：新增 Semantic Leakage Rate (SLR)
-- 对每条合成跑 ASR，算 ASR 文本与 ref_text 的 BLEU-1 / ROUGE-L
+- ASR 输出与 ref_text 的字符重叠率
 - SLR = 0 表示完全不泄露，SLR > 0.3 表示严重泄露
-- Sad baseline SLR ≈ 0.4-0.6（需要精确计算）
 
-**解决路线（按可行性排序）**：
+#### 3.4.1 Approach B: Content-Masked Speech Tokens — ❌ 证伪
 
-| 方案 | 描述 | 工作量 | 科研价值 |
+2026-05-28 消融实验证实：**mask speech token 反而增加泄漏**。
+
+| Text | SLR_nomask | SLR_prefix (mask 86%) | SLR_energy (mask 80%) |
 |---|---|---|---|
-| **A. Inference-time Negative Prompt** | 推理时将 ref_text 作为"禁止生成"的负向 token 传入 LLM decoder（类似 LLM 的 negative prompt） | 1 周 | ⭐⭐ |
-| **B. Content-Masked Speech Tokens** | 在 speech tokenizer 输出端加一个轻量 content filter——用 ref_text 的 token 位置 mask 掉对应 speech token，强制模型从 speaker embedding 获取风格 | 2-3 周 | ⭐⭐⭐ |
-| **C. Disentangled Ref Encoding** | 拆分 ref 处理为两条独立路径：(a) speaker identity via WavLM embedding, (b) prosody via 内容无关的韵律 encoder（F0 contour + energy + duration，不含 phoneme） | 4-6 周 | ⭐⭐⭐⭐⭐ |
-| **D. Adversarial Content Removal** | 训练一个辅助分类器从 speech tokens 预测 ref text，主模型通过梯度反转学习欺骗分类器——强制 speech tokens 忘记语义 | 4-6 周 | ⭐⭐⭐⭐ |
-| **E. Data-side: Contrastive Pairs** | 在 Tier 1 LoRA 训练数据中加入"同风格不同内容"的 contrastive pair，让模型显式学到 style ≠ content | 1 周（数据准备） | ⭐⭐ |
+| zh_news | 0.033 | 0.382 | 0.259 |
+| zh_prose | 0.042 | 0.343 | 0.216 |
 
-**推荐**：
-- **求职项目**：A（快速 demo）+ E（数据侧验证）+ B（核心贡献）。A 让面试时能 demo 修复，B 展示你理解了 tokenization 层的根因
-- **Paper**：C 或 D。Disentangled conditioning 是 TTS 社区正在攻的方向，且 CosyVoice 3 官方未触碰
+根因：mask speech token → 模型失去韵律条件 → 退化到 speaker embedding → embedding 携带更强的语义偏差 → 泄漏加剧。
 
-**与目标 #1 的统一**：SLR 和 instruct ΔSS 是同一个深层问题（conditioning 无解耦）的两种表现。任何解了 semantic leakage 的方案，大概率同时改善 instruct ΔSS——因为它们都在修 "model confuses style signal with content/speaker signal"。
+#### 3.4.2 Approach C: Dual-Path Content-Suppressed Conditioning（修正版）
+
+**实验已证实**：
+- Speech token 置零后模型**仍能生成可懂语音** → prosody-only 架构可行
+- Speaker embedding 是**更强的泄漏源** → 也需要 content suppression
+
+**修正后方案**：同时修两路
+
+```
+Ref Audio ──┬──► CAM++ ──► [Content Suppression] ──► speaker_embedding (192-dim)
+            │              (对抗训练或 projection     "谁在说话，但不说什么"
+            │               让 embedding 忘掉语义)
+            │
+            ├──► F0 + Energy + Voiced ──► Prosody Projection ──► prosody_embedding
+            │    (librosa.pyin + RMS)       (Linear 3→64→192)    "怎么说话"
+            │
+            └──► (speech token 通道移除)
+```
+
+**两路各做什么**：
+
+| 路 | 输入 | 输出 | 训练方式 |
+|---|---|---|---|
+| Speaker (content-suppressed) | CAM++ embedding | speaker_embedding (192-dim) | 对抗训练：加一个轻量分类器从 embedding 猜 ref_text，encoder 通过梯度反转学习欺骗分类器 |
+| Prosody | F0 contour + energy + voiced_flag | prosody_embedding (192-dim) | 投影层 + cross-attention into LLM |
+
+**与目标 #1 的统一**：SLR 和 instruct ΔSS 是同一个深层问题（conditioning 无解耦）的两种表现。方案 C 修的是根因，一旦跑通，两个目标同时受益。
 
 ### 3.3 子问题 3：跨架构泛化（P3: optional，求职亮点）
 

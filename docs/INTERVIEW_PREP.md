@@ -114,7 +114,9 @@ CosyVoice 3 内部模型结构不是标准 `nn.Module`（`CosyVoice3Model` 无 `
 
 **不是 LoRA 引入的**：zero-shot baseline 同样有此问题。
 
-**修复路线**：方案 B（推理时 mask ref 对应的 speech token，不改模型，0 GPU，1 周）已实现 `cosyvoice/cli/content_mask.py`（prefix/energy/ctc 三种 mask 策略）。方案 C（架构拆解：去 speech token，换纯韵律特征 + cross-attention，4-6 周）已设计。
+**修复路线**：
+- 方案 B（Content-Masked Tokens）已实现 + 消融实验 → **证伪**（mask 反而增加泄漏：SLR 0.04→0.18）。根因：speech token 不是主要泄漏源。
+- 方案 C（Dual-Path Content-Suppressed Conditioning）修正版——同时修 speaker embedding（对抗训练忘掉语义）+ prosody-only 通道（F0/energy/voiced 替换 speech token）。关键实验已证实可行性：speech token 置零后模型仍能生成可懂语音。
 
 ---
 
