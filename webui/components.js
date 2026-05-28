@@ -1,597 +1,841 @@
-// components.js — Vue 3 components for the TTS playground.
-// No SFC, no bundler — template strings rendered at runtime.
+// components.js — Vue 3 components for the TTS playground (redesign v2).
 //
-// components.js ——TTS playground 的 Vue 3 组件，用 template string 写，
-// 不走 SFC、不走打包器，运行时直接渲染。
+// Layout: 3-zone bento (per ui-ux-pro-max-skill + A2UI pattern).
+//   Zone 1 — VoiceSourcePanel  (B站 / YouTube / Upload / Built-in tabs)
+//   Zone 2 — PipelineDAG       (Cytoscape.js DAG of agent stages)
+//   Zone 3 — SynthesisPanel    (text + voice config + scores)
+//
+// Design tokens come from styles/base.css + styles/zones.css.
+// Backend API contract is unchanged — same endpoints, same payloads.
+//
+// components.js ——TTS playground 的 Vue 3 组件（v2 重设）。
+// 三区 bento + Cytoscape.js A2UI DAG，沿用 ui-ux-pro-max-skill 推荐的设计 token。
+// 后端 API 契约不变，只换前端表现层。
 
-const { defineComponent, computed, ref, watch } = Vue;
+const { defineComponent, computed, ref, watch, onMounted, onUnmounted } = Vue;
+
 
 // ---------------------------------------------------------------------------
-// PipelineCard — vertical stage list for any backend job exposing a `stages`
-// array of {name, status, started_at, finished_at, elapsed_s, detail}.
-// Reused by both the Bilibili import job (live) and the TTS synth+eval flow
-// (assembled client-side from existing state).
-// PipelineCard ——通用的竖排 stage 卡片；输入是 stages 数组，
-// 同时被 B 站 import（后端真实数据）和 TTS 合成（前端从已有状态拼出来）复用。
+// PipelineDAG — Cytoscape.js A2UI-style DAG of agent stages.
+//
+// Stages from the backend are linear (download / transcribe / persist for
+// bilibili import, or source / preprocess / dataset for full ingest). We
+// render them as nodes + edges with live status colors and a click-to-inspect
+// side panel.
+//
+// PipelineDAG ——A2UI 风格的 Cytoscape.js DAG。后端给的 stages 是线性的，
+// 我们渲染成节点 + 边 + 状态色 + 点击侧栏看详情。
 // ---------------------------------------------------------------------------
 
-export const PipelineCard = defineComponent({
-  name: "PipelineCard",
+const STATE_COLOR = {
+  pending: "#475569",
+  running: "#6B8FAF",
+  done:    "#22C55E",
+  error:   "#EF4444",
+};
+
+export const PipelineDAG = defineComponent({
+  name: "PipelineDAG",
   props: {
-    title: { type: String, default: "Pipeline" },
-    stages: { type: Array, required: true },
+    title:  { type: String, default: "Pipeline" },
+    stages: { type: Array,  required: true },
   },
-  setup(props) {
-    // Force a re-render every second so the "elapsed" of a running stage
-    // ticks even between polls. We don't read this value — assigning it
-    // is what triggers Vue's reactivity.
-    // 每秒强制 re-render 一次，让 running stage 的耗时即使在两次轮询之间
-    // 也能"跳秒"——读不到这个值没关系，赋值动作触发响应即可。
-    const tick = ref(0);
-    const timer = setInterval(() => { tick.value++; }, 1000);
-    Vue.onUnmounted(() => clearInterval(timer));
-
-    const icon = (s) => ({
-      pending: "○",
-      running: "⏳",
-      done:    "✓",
-      error:   "✗",
-    })[s.status] || "?";
-
-    const iconColor = (s) => ({
-      pending: "#aaa",
-      running: "#1e88e5",
-      done:    "#2e7d32",
-      error:   "#c62828",
-    })[s.status] || "#888";
-
-    const fmtElapsed = (s) => {
-      void tick.value;  // subscribe to ticks
-      if (s.elapsed_s != null) return `${s.elapsed_s.toFixed(1)}s`;
-      if (s.status === "running" && s.started_at) {
-        const start = new Date(s.started_at).getTime();
-        const sec = ((Date.now() - start) / 1000).toFixed(0);
-        return `${sec}s…`;
-      }
-      return "";
-    };
-
-    return { icon, iconColor, fmtElapsed };
-  },
-  template: `
-    <div class="card">
-      <div class="card-title">{{ title }}</div>
-      <div v-for="(s, i) in stages" :key="i"
-           style="padding:6px 0;"
-           :style="i < stages.length - 1 ? 'border-bottom:1px solid #eee;' : ''">
-        <div style="display:flex; gap:8px; align-items:baseline;">
-          <span style="font-family:monospace; width:1.2em; font-size:14px;"
-                :style="{color: iconColor(s)}">{{ icon(s) }}</span>
-          <span style="font-weight:600; flex:1; text-transform:capitalize;">{{ s.name }}</span>
-          <span class="field-hint" style="font-size:11px;">{{ fmtElapsed(s) }}</span>
-        </div>
-        <div v-if="s.detail"
-             class="field-hint"
-             style="margin-left:1.9em; font-size:11px; word-break:break-word;">
-          {{ s.detail }}
-        </div>
-      </div>
-    </div>
-  `,
-});
-
-// ---------------------------------------------------------------------------
-// RefPanel — choose a built-in ref or upload a new one.
-// RefPanel ——选用内置 ref 或上传新 ref。
-// ---------------------------------------------------------------------------
-
-export const RefPanel = defineComponent({
-  name: "RefPanel",
-  components: { PipelineCard },
-  props: {
-    refs: { type: Array, required: true },
-    selectedRefId: { type: String, default: "" },
-    promptText: { type: String, default: "" },
-    uploading: { type: Boolean, default: false },
-    // Bilibili import UI state, owned by the parent so all backend chatter
-    // stays in app.js. bilibiliProbing / bilibiliImporting are flags;
-    // bilibiliProbeResult is the /api/bilibili/probe response (or null);
-    // bilibiliJob is the latest /api/bilibili/import/{id} state (or null).
-    // B 站导入 UI 状态由父组件持有，后端通信集中在 app.js。
-    bilibiliProbing: { type: Boolean, default: false },
-    bilibiliProbeResult: { type: Object, default: null },
-    bilibiliImporting: { type: Boolean, default: false },
-    bilibiliJob: { type: Object, default: null },
-    bilibiliError: { type: String, default: "" },
-  },
-  emits: [
-    "update:selectedRefId", "update:promptText", "upload",
-    "bilibili-probe", "bilibili-import", "bilibili-reset",
-  ],
+  emits: ["node-select"],
   setup(props, { emit }) {
-    const onSelect = (e) => emit("update:selectedRefId", e.target.value);
-    const onPrompt = (e) => emit("update:promptText", e.target.value);
-    const onFile = (e) => {
-      const file = e.target.files && e.target.files[0];
-      if (file) emit("upload", file);
-      e.target.value = ""; // allow re-upload same file
-    };
+    const cyRef = ref(null);
+    let cy = null;
 
-    const selectedRef = computed(() =>
-      props.refs.find((r) => r.ref_id === props.selectedRefId) || null
-    );
-
-    // Local UI state for the Bilibili form. Lives here because it's purely
-    // form-input scratch — parent doesn't need to round-trip it.
-    // 本地 UI 状态——只是 form 输入草稿，不需要父组件参与。
-    const bvUrl = ref("");
-    const bvPartIndex = ref(null);   // 1-based; null = let backend default
-    const bvStartSec = ref(null);
-    const bvEndSec = ref(null);
-    const bvUseSubtitle = ref(true);
-
-    const onProbe = () => {
-      const u = bvUrl.value.trim();
-      if (!u) return;
-      emit("bilibili-probe", u);
-    };
-
-    const onImport = () => {
-      const u = bvUrl.value.trim();
-      if (!u) return;
-      emit("bilibili-import", {
-        url: u,
-        part_index: bvPartIndex.value,
-        start_sec: bvStartSec.value,
-        end_sec: bvEndSec.value,
-        use_subtitle_as_prompt: bvUseSubtitle.value,
+    function buildElements(stages) {
+      const els = [];
+      stages.forEach((s, i) => {
+        els.push({ data: {
+          id: `s_${i}_${s.name}`,
+          label: s.name,
+          color: STATE_COLOR[s.status] || STATE_COLOR.pending,
+          status: s.status,
+          stageIdx: i,
+        }});
+        if (i > 0) {
+          els.push({ data: {
+            source: `s_${i-1}_${stages[i-1].name}`,
+            target: `s_${i}_${s.name}`,
+          }});
+        }
       });
-    };
+      return els;
+    }
 
-    const onReset = () => {
-      bvUrl.value = "";
-      bvPartIndex.value = null;
-      bvStartSec.value = null;
-      bvEndSec.value = null;
-      bvUseSubtitle.value = true;
-      emit("bilibili-reset");
-    };
+    function initCy() {
+      if (!cyRef.value || cy) return;
+      cy = cytoscape({
+        container: cyRef.value,
+        elements: buildElements(props.stages),
+        style: [
+          {
+            selector: "node",
+            style: {
+              "background-color": "data(color)",
+              label: "data(label)",
+              color: "#F8FAFC",
+              "text-valign": "bottom",
+              "text-margin-y": 8,
+              "font-family": "Fira Code, monospace",
+              "font-size": "11px",
+              "text-transform": "capitalize",
+              width: 40, height: 40,
+              "border-width": 2,
+              "border-color": "#0F172A",
+            },
+          },
+          {
+            selector: 'node[status = "running"]',
+            style: { "border-color": "#6B8FAF", "border-width": 3 },
+          },
+          {
+            selector: "node:selected",
+            style: { "border-color": "#22C55E", "border-width": 4 },
+          },
+          {
+            selector: "edge",
+            style: {
+              "curve-style": "bezier",
+              "target-arrow-shape": "triangle",
+              "line-color": "#90A4AE",
+              "target-arrow-color": "#90A4AE",
+              opacity: 0.5,
+              width: 2,
+            },
+          },
+        ],
+        layout: { name: "breadthfirst", directed: true, spacingFactor: 1.4, padding: 16 },
+        wheelSensitivity: 0.2,
+      });
 
-    const probe = computed(() => props.bilibiliProbeResult);
-    const isMultiP = computed(() => probe.value && probe.value.parts && probe.value.parts.length > 1);
-    const hasSubs = computed(() =>
-      probe.value && probe.value.available_subtitles && probe.value.available_subtitles.length > 0
-    );
+      cy.on("tap", "node", (evt) => {
+        const idx = evt.target.data("stageIdx");
+        if (idx != null) emit("node-select", { index: idx, stage: props.stages[idx] });
+      });
 
-    const formatDuration = (s) => {
-      if (s == null) return "?";
-      const m = Math.floor(s / 60);
-      const sec = (s - m * 60).toFixed(1);
-      return m > 0 ? `${m}m${sec}s` : `${sec}s`;
-    };
+      // Pulse the currently-running node.
+      // 给 running 节点加脉冲动画，作为 A2UI 的视觉心跳。
+      pulseInterval = setInterval(() => {
+        if (!cy) return;
+        const running = cy.nodes('[status = "running"]');
+        if (running.length === 0) return;
+        running.animate(
+          { style: { "border-width": 6 } },
+          { duration: 600, complete: () => {
+            running.animate({ style: { "border-width": 3 } }, { duration: 600 });
+          }},
+        );
+      }, 1400);
+    }
 
-    return {
-      onSelect, onPrompt, onFile, selectedRef,
-      bvUrl, bvPartIndex, bvStartSec, bvEndSec, bvUseSubtitle,
-      onProbe, onImport, onReset,
-      probe, isMultiP, hasSubs, formatDuration,
-    };
-  },
-  template: `
-    <div class="card">
-      <div class="card-title">Reference Audio</div>
+    let pulseInterval = null;
 
-      <div class="field">
-        <label class="field-label">Built-in reference</label>
-        <select class="select" :value="selectedRefId" @change="onSelect">
-          <option value="">— pick one —</option>
-          <option v-for="r in refs" :key="r.ref_id" :value="r.ref_id">
-            [{{ r.source }}] {{ r.ref_id }} ({{ r.duration ? r.duration.toFixed(1)+'s' : '?' }})
-          </option>
-        </select>
-      </div>
+    function updateCy() {
+      if (!cy) { initCy(); return; }
+      // Diff: keep IDs stable per stage index so we can do a fast in-place
+      // update without rebuilding the layout (which would jitter the graph).
+      // 通过稳定 ID 做就地更新，不重建 layout，避免抖动。
+      props.stages.forEach((s, i) => {
+        const id = `s_${i}_${s.name}`;
+        const n = cy.getElementById(id);
+        if (n.empty()) {
+          // Stage appeared (rare); rebuild fully.
+          cy.elements().remove();
+          cy.add(buildElements(props.stages));
+          cy.layout({ name: "breadthfirst", directed: true, spacingFactor: 1.4 }).run();
+          return;
+        }
+        n.data("color", STATE_COLOR[s.status] || STATE_COLOR.pending);
+        n.data("status", s.status);
+      });
+      cy.style().update();
+    }
 
-      <div class="field">
-        <label class="field-label">Or upload a new wav/mp3</label>
-        <input type="file"
-               class="file-input"
-               accept="audio/wav,audio/mpeg,audio/x-wav,.wav,.mp3"
-               :disabled="uploading"
-               @change="onFile" />
-        <div v-if="uploading" class="field-hint">uploading + auto-ASR... (5-15s)</div>
-      </div>
+    onMounted(() => initCy());
+    onUnmounted(() => {
+      if (pulseInterval) clearInterval(pulseInterval);
+      if (cy) { cy.destroy(); cy = null; }
+    });
 
-      <div class="field">
-        <label class="field-label">Or paste a Bilibili URL</label>
-        <div style="display:flex; gap:6px;">
-          <input type="text"
-                 class="select"
-                 style="flex:1;"
-                 v-model="bvUrl"
-                 :disabled="bilibiliProbing || bilibiliImporting"
-                 placeholder="https://www.bilibili.com/video/BVxxx or bare BV id" />
-          <button type="button"
-                  class="select"
-                  style="cursor:pointer; padding:4px 12px;"
-                  :disabled="bilibiliProbing || bilibiliImporting || !bvUrl.trim()"
-                  @click="onProbe">
-            {{ bilibiliProbing ? 'Probing...' : 'Probe' }}
-          </button>
-        </div>
-        <div v-if="bilibiliError" class="field-hint" style="color:#c0392b;">
-          {{ bilibiliError }}
-        </div>
+    watch(() => props.stages, () => updateCy(), { deep: true });
 
-        <div v-if="probe" style="margin-top:8px; padding:8px; border:1px solid #ddd; border-radius:4px;">
-          <div style="font-weight:600; margin-bottom:4px;">{{ probe.title }}</div>
-          <div class="field-hint">
-            UP: {{ probe.uploader }} ·
-            total: {{ formatDuration(probe.duration) }} ·
-            parts: {{ probe.parts.length }}
-            <span v-if="hasSubs"> · subtitles: {{ probe.available_subtitles.join(', ') }}</span>
-          </div>
-
-          <div v-if="isMultiP" class="field" style="margin-top:6px;">
-            <label class="field-label">Pick a part</label>
-            <select class="select" v-model.number="bvPartIndex">
-              <option :value="null">— part 1 (default) —</option>
-              <option v-for="p in probe.parts" :key="p.index" :value="p.index">
-                P{{ p.index }} · {{ formatDuration(p.duration) }} · {{ p.title }}
-              </option>
-            </select>
-          </div>
-
-          <div class="field" style="margin-top:6px;">
-            <label class="field-label">Time range (optional, seconds)</label>
-            <div style="display:flex; gap:6px; align-items:center;">
-              <input type="number" class="select" style="width:90px;"
-                     v-model.number="bvStartSec" min="0" step="0.5"
-                     placeholder="start" />
-              <span>→</span>
-              <input type="number" class="select" style="width:90px;"
-                     v-model.number="bvEndSec" min="0" step="0.5"
-                     placeholder="end" />
-              <span class="field-hint">tip: 20–40s clip is plenty for a voice reference</span>
-            </div>
-          </div>
-
-          <div class="field" v-if="hasSubs" style="margin-top:6px;">
-            <label style="display:flex; align-items:center; gap:6px; font-weight:normal;">
-              <input type="checkbox" v-model="bvUseSubtitle" />
-              Use official subtitle as prompt_text (skips ASR)
-            </label>
-          </div>
-
-          <div style="display:flex; gap:6px; margin-top:8px;">
-            <button type="button"
-                    class="select"
-                    style="cursor:pointer; padding:4px 12px;"
-                    :disabled="bilibiliImporting"
-                    @click="onImport">
-              {{ bilibiliImporting ? 'Importing...' : 'Import as reference' }}
-            </button>
-            <button type="button"
-                    class="select"
-                    style="cursor:pointer; padding:4px 12px;"
-                    :disabled="bilibiliImporting"
-                    @click="onReset">
-              Cancel
-            </button>
-          </div>
-
-          <div v-if="bilibiliJob && bilibiliJob.stages && bilibiliJob.stages.length"
-               style="margin-top:8px;">
-            <PipelineCard
-              :title="'B 站 import · ' + (bilibiliJob.progress_hint || bilibiliJob.status)"
-              :stages="bilibiliJob.stages" />
-          </div>
-          <div v-else-if="bilibiliJob" class="field-hint" style="margin-top:6px;">
-            [{{ bilibiliJob.status }}] {{ bilibiliJob.progress_hint }}
-          </div>
-        </div>
-      </div>
-
-      <div class="field">
-        <label class="field-label">prompt_text (what the reference audio says)</label>
-        <textarea class="textarea"
-                  :value="promptText"
-                  @input="onPrompt"
-                  placeholder="auto-filled after upload; editable"></textarea>
-        <div class="field-hint">
-          zero_shot mode needs this to match the reference audio's actual words.
-        </div>
-      </div>
-    </div>
-  `,
-});
-
-// ---------------------------------------------------------------------------
-// TextPanel — target text to synthesise.
-// TextPanel ——要合成的目标文本。
-// ---------------------------------------------------------------------------
-
-export const TextPanel = defineComponent({
-  name: "TextPanel",
-  props: {
-    text: { type: String, default: "" },
-  },
-  emits: ["update:text"],
-  setup(props, { emit }) {
-    return { onInput: (e) => emit("update:text", e.target.value) };
-  },
-  template: `
-    <div class="card">
-      <div class="card-title">Target Text</div>
-      <textarea class="textarea textarea-tall"
-                :value="text"
-                @input="onInput"
-                placeholder="e.g. It's great to be back in Beijing, truly fantastic..."></textarea>
-    </div>
-  `,
-});
-
-// ---------------------------------------------------------------------------
-// VoiceConfigForm — ElevenLabs-style structured form.
-// VoiceConfigForm ——ElevenLabs 风格的结构化表单。
-// ---------------------------------------------------------------------------
-
-export const VoiceConfigForm = defineComponent({
-  name: "VoiceConfigForm",
-  props: {
-    config: { type: Object, required: true },
-    composed: { type: String, default: "" },
-  },
-  emits: ["update:config"],
-  setup(props, { emit }) {
-    const set = (k, v) => emit("update:config", { ...props.config, [k]: v });
-    const setRadio = (k, v) => set(k, props.config[k] === v ? null : v);
-    return { set, setRadio };
+    return { cyRef };
   },
   template: `
     <div>
-      <div class="field">
-        <label class="field-label">Language</label>
-        <select class="select"
-                :value="config.language"
-                @change="set('language', $event.target.value)">
-          <option>English</option>
-          <option>Chinese</option>
-        </select>
-      </div>
-
-      <div class="field">
-        <label class="field-label">Gender</label>
-        <div class="field-radio-group">
-          <button class="radio-btn"
-                  :class="{ 'is-active': config.gender === 'male' }"
-                  @click="setRadio('gender', 'male')">male</button>
-          <button class="radio-btn"
-                  :class="{ 'is-active': config.gender === 'female' }"
-                  @click="setRadio('gender', 'female')">female</button>
-        </div>
-      </div>
-
-      <div class="field">
-        <label class="field-label">Age</label>
-        <div class="field-radio-group">
-          <button class="radio-btn"
-                  :class="{ 'is-active': config.age === 'young' }"
-                  @click="setRadio('age', 'young')">young</button>
-          <button class="radio-btn"
-                  :class="{ 'is-active': config.age === 'middle' }"
-                  @click="setRadio('age', 'middle')">middle</button>
-          <button class="radio-btn"
-                  :class="{ 'is-active': config.age === 'old' }"
-                  @click="setRadio('age', 'old')">old</button>
-        </div>
-      </div>
-
-      <div class="field">
-        <label class="field-label">Quality</label>
-        <div class="field-radio-group">
-          <button class="radio-btn"
-                  :class="{ 'is-active': config.quality === 'studio' }"
-                  @click="setRadio('quality', 'studio')">studio</button>
-          <button class="radio-btn"
-                  :class="{ 'is-active': config.quality === 'broadcast' }"
-                  @click="setRadio('quality', 'broadcast')">broadcast</button>
-          <button class="radio-btn"
-                  :class="{ 'is-active': config.quality === 'casual' }"
-                  @click="setRadio('quality', 'casual')">casual</button>
-        </div>
-      </div>
-
-      <div class="field">
-        <label class="field-label">Persona (2–5 words)</label>
-        <input class="input"
-               :value="config.persona"
-               @input="set('persona', $event.target.value)"
-               placeholder="confident teacher" />
-      </div>
-
-      <div class="field">
-        <label class="field-label">Emotion (2–3 adjectives)</label>
-        <input class="input"
-               :value="config.emotion"
-               @input="set('emotion', $event.target.value)"
-               placeholder="calm, warm" />
-      </div>
-
-      <div class="field">
-        <label class="field-label">Description (1–2 sentences on timbre / pacing / delivery)</label>
-        <textarea class="textarea"
-                  :value="config.description"
-                  @input="set('description', $event.target.value)"
-                  placeholder="Slow tempo with clear consonants. Slight rising tone at sentence endings."></textarea>
-      </div>
-
-      <div class="field">
-        <label class="field-label">Composed instruct (live preview)</label>
-        <div class="composed-preview" :class="{ 'is-empty': !composed }">{{ composed }}</div>
+      <div class="zone-title" style="margin-bottom: 6px;">{{ title }}</div>
+      <div class="cy-canvas" ref="cyRef"></div>
+      <div class="legend">
+        <span><i class="dot" style="background:#475569"></i>pending</span>
+        <span><i class="dot" style="background:#6B8FAF"></i>running</span>
+        <span><i class="dot" style="background:#22C55E"></i>done</span>
+        <span><i class="dot" style="background:#EF4444"></i>error</span>
+        <span class="right">click a node for details</span>
       </div>
     </div>
   `,
 });
 
+
 // ---------------------------------------------------------------------------
-// ConfigPanel — mode toggle + VoiceConfigForm (only for instruct).
-// ConfigPanel ——mode 切换 + VoiceConfigForm（仅 instruct 模式）。
+// NodeDetailPanel — side panel for an A2UI DAG node.
+//
+// Shows status / elapsed / detail line. When no node is selected (or the
+// stage hasn't started), shows a hint.
+// 显示选中 stage 的详情；未选中时给提示。
 // ---------------------------------------------------------------------------
 
-export const ConfigPanel = defineComponent({
-  name: "ConfigPanel",
-  components: { VoiceConfigForm },
+export const NodeDetailPanel = defineComponent({
+  name: "NodeDetailPanel",
   props: {
-    mode: { type: String, default: "zero_shot" },
-    config: { type: Object, required: true },
-    composed: { type: String, default: "" },
+    stage:    { type: Object, default: null },
+    jobMeta:  { type: Object, default: null },  // {job_id, status, name, ...}
   },
-  emits: ["update:mode", "update:config"],
+  setup(props) {
+    const tick = ref(0);
+    const timer = setInterval(() => { tick.value++; }, 1000);
+    onUnmounted(() => clearInterval(timer));
+
+    const elapsedStr = computed(() => {
+      void tick.value;
+      const s = props.stage;
+      if (!s) return "";
+      if (s.elapsed_s != null) return `${s.elapsed_s.toFixed(1)}s`;
+      if (s.status === "running" && s.started_at) {
+        const sec = ((Date.now() - new Date(s.started_at).getTime()) / 1000).toFixed(0);
+        return `${sec}s…`;
+      }
+      return "—";
+    });
+
+    return { elapsedStr };
+  },
   template: `
-    <div class="card">
-      <div class="card-title">Voice Config</div>
-
-      <div class="mode-toggle">
-        <button class="radio-btn"
-                :class="{ 'is-active': mode === 'zero_shot' }"
-                @click="$emit('update:mode', 'zero_shot')">zero_shot</button>
-        <button class="radio-btn"
-                :class="{ 'is-active': mode === 'instruct' }"
-                @click="$emit('update:mode', 'instruct')">instruct</button>
-      </div>
-
-      <div v-if="mode === 'zero_shot'" class="field-hint">
-        zero_shot copies the reference audio's voice + style directly.
-        No voice config needed — just pick a good reference.
-      </div>
-
-      <VoiceConfigForm v-else
-                       :config="config"
-                       :composed="composed"
-                       @update:config="$emit('update:config', $event)" />
+    <div class="node-detail">
+      <template v-if="stage">
+        <div class="nd-title" style="text-transform: capitalize;">{{ stage.name }}</div>
+        <div class="nd-row"><span>status</span>
+          <span class="v" :style="{color: stage.status === 'done' ? '#22C55E'
+                                       : stage.status === 'running' ? '#6B8FAF'
+                                       : stage.status === 'error' ? '#EF4444' : '#94A3B8'}">
+            {{ stage.status }}
+          </span>
+        </div>
+        <div class="nd-row"><span>elapsed</span><span class="v">{{ elapsedStr }}</span></div>
+        <div class="nd-row" v-if="stage.started_at">
+          <span>started</span>
+          <span class="v">{{ stage.started_at.replace('T',' ').replace('+00:00','') }}</span>
+        </div>
+        <div class="nd-row" v-if="jobMeta && jobMeta.job_id">
+          <span>job_id</span><span class="v">{{ jobMeta.job_id.slice(0, 28) }}…</span>
+        </div>
+        <div v-if="stage.detail" class="nd-log">{{ stage.detail }}</div>
+      </template>
+      <template v-else>
+        <div class="nd-hint">No stage selected.<br/>Click a node on the left to inspect.</div>
+        <template v-if="jobMeta && jobMeta.job_id">
+          <hr style="border:none; border-top:1px solid #1F2A3D; margin: 10px 0;" />
+          <div class="nd-row"><span>job</span><span class="v">{{ jobMeta.name }}</span></div>
+          <div class="nd-row"><span>source</span><span class="v">{{ jobMeta.source }}</span></div>
+          <div class="nd-row"><span>status</span><span class="v">{{ jobMeta.status }}</span></div>
+        </template>
+      </template>
     </div>
   `,
 });
 
+
 // ---------------------------------------------------------------------------
-// ActionBar — Synthesize button + status pill.
-// ActionBar ——合成按钮 + 状态指示。
+// SourceTabs — small tab strip used by VoiceSourcePanel.
+// 子组件：源类型切换 tab。
 // ---------------------------------------------------------------------------
 
-export const ActionBar = defineComponent({
-  name: "ActionBar",
+export const SourceTabs = defineComponent({
+  name: "SourceTabs",
   props: {
-    status: { type: String, default: "idle" }, // idle / running / ok / error
-    statusMessage: { type: String, default: "" },
-    canRun: { type: Boolean, default: false },
+    active:        { type: String, required: true },
+    uploadedCount: { type: Number, default: 0 },
   },
-  emits: ["synthesize"],
+  emits: ["update:active"],
+  setup(props, { emit }) {
+    const tabs = [
+      { key: "bilibili", label: "B站 URL" },
+      { key: "youtube",  label: "YouTube" },
+      { key: "upload",   label: "Upload" },
+      { key: "uploaded", label: "Uploaded" },
+      { key: "builtin",  label: "Built-in" },
+    ];
+    return { tabs, set: (k) => emit("update:active", k) };
+  },
   template: `
-    <div class="card">
-      <div style="display:flex; align-items:center; gap:14px; flex-wrap:wrap;">
-        <button class="btn"
-                :disabled="!canRun || status === 'running'"
-                @click="$emit('synthesize')">
-          {{ status === 'running' ? 'Synthesizing...' : 'Synthesize' }}
-        </button>
-        <span class="status-pill" :class="'status-' + status">{{ status }}</span>
-        <span v-if="statusMessage" style="color:var(--fg-muted); font-size:12px;">
-          {{ statusMessage }}
+    <div class="tabs">
+      <button v-for="t in tabs" :key="t.key"
+              class="tab"
+              :class="{active: active === t.key}"
+              @click="set(t.key)">
+        {{ t.label }}
+        <span v-if="t.key === 'uploaded' && uploadedCount" class="badge">{{ uploadedCount }}</span>
+      </button>
+    </div>
+  `,
+});
+
+
+// ---------------------------------------------------------------------------
+// ReferencePreview — show the currently-selected reference with waveform +
+// prompt text. Pure presentation; play button toggles a hidden <audio>.
+// 当前选中参考音频的预览卡（波形占位 + 文本 + 试听）。
+// ---------------------------------------------------------------------------
+
+export const ReferencePreview = defineComponent({
+  name: "ReferencePreview",
+  // NOTE: `ref` is a reserved attribute in Vue 3 (template refs). Don't name
+  // a prop `ref` — bindings like `:ref="x"` get hijacked by the template-ref
+  // system and the prop is never populated. Using `audio` here instead.
+  // 注意：Vue 3 里 `ref` 是模板 ref 的保留属性名，不能当 prop 名用；
+  // 否则 `:ref="x"` 会被模板 ref 系统抢走，props.ref 永远是 undefined。
+  props: {
+    audio: { type: Object, default: null },
+  },
+  setup(props) {
+    const audioElRef = ref(null);
+    const playing = ref(false);
+
+    const audioUrl = computed(() => {
+      const r = props.audio;
+      if (!r) return "";
+      // Uploaded / bilibili-imported refs point at outputs/webui/uploads/.
+      // Built-in refs point at datasets/<name>/chunks/. We serve them via
+      // /static/... since webui is mounted as the static root, but uploads
+      // live under outputs/ which isn't mounted — fallback to file path.
+      // 上传/B 站导入的产物走 /static 拿不到；当前 webui 没暴露 raw audio 端点，
+      // 这里仅作为占位 UX，真正试听要后端加端点。先用空 src，按钮 disabled。
+      return "";
+    });
+
+    function togglePlay() {
+      if (!audioElRef.value) return;
+      if (playing.value) audioElRef.value.pause();
+      else audioElRef.value.play();
+    }
+
+    // Fake waveform — 60 random-but-stable bars driven by ref_id hash.
+    // 假波形：60 个随机但稳定的竖条（按 ref_id hash 种子），仅展示用。
+    const bars = computed(() => {
+      const r = props.audio;
+      if (!r) return [];
+      let seed = 0;
+      for (const c of r.ref_id || "") seed = (seed * 31 + c.charCodeAt(0)) & 0xffffffff;
+      const out = [];
+      for (let i = 0; i < 60; i++) {
+        seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+        const h = 6 + (seed % 32);
+        out.push({ x: i * 6, y: (44 - h) / 2, h });
+      }
+      return out;
+    });
+
+    return { audioElRef, audioUrl, playing, togglePlay, bars };
+  },
+  template: `
+    <div class="vinfo" v-if="audio">
+      <h4>
+        <span>Active reference</span>
+        <code style="font-size: 10px; color: var(--fg-muted);">
+          {{ audio.ref_id }} · {{ audio.duration ? audio.duration.toFixed(1)+'s' : '—' }}
+        </code>
+      </h4>
+      <div class="waveform">
+        <svg viewBox="0 0 360 44" preserveAspectRatio="none">
+          <g fill="#6B8FAF">
+            <rect v-for="(b, i) in bars" :key="i"
+                  :x="b.x" :y="b.y" width="3" :height="b.h" rx="1" />
+          </g>
+        </svg>
+      </div>
+      <div class="play-row">
+        <button class="play-btn" disabled title="audio streaming endpoint TBD">▶</button>
+        <span>{{ audio.duration ? audio.duration.toFixed(1) + 's' : '—' }}</span>
+        <span style="margin-left:auto; max-width: 60%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
+          prompt: <span style="color: var(--fg);">{{ audio.prompt_text || '—' }}</span>
         </span>
       </div>
     </div>
-  `,
-});
-
-// ---------------------------------------------------------------------------
-// PlayerPanel — audio playback + meta.
-// PlayerPanel ——音频播放 + 元信息。
-// ---------------------------------------------------------------------------
-
-export const PlayerPanel = defineComponent({
-  name: "PlayerPanel",
-  props: {
-    syn: { type: Object, default: null }, // {syn_id, audio_url, wall_time_s, mode, composed_instruct}
-    evalStatus: { type: String, default: "" }, // "", "running", "done", "error"
-    evalScores: { type: Object, default: null }, // EvalScores
-  },
-  setup() {
-    // Quality thresholds for color-coding (based on community benchmarks
-    // and our exp_002 baseline observations).
-    // 阈值用来给单元格上色；参考 community + exp_002 baseline。
-    const tier = (key, val) => {
-      if (val === null || val === undefined) return "";
-      if (key === "mos") return val >= 4.0 ? "good" : val >= 3.5 ? "ok" : "bad";
-      if (key === "wer") return val <= 0.10 ? "good" : val <= 0.25 ? "ok" : "bad";
-      if (key === "secs") return val >= 0.85 ? "good" : val >= 0.70 ? "ok" : "bad";
-      if (key === "f0") return val <= 30 ? "good" : val <= 60 ? "ok" : "bad";
-      return "";
-    };
-    const fmt = (v, n = 3) => (v === null || v === undefined) ? "—" : v.toFixed(n);
-    return { tier, fmt };
-  },
-  template: `
-    <div class="card" v-if="syn">
-      <div class="card-title">Player</div>
-      <div class="player-row">
-        <audio class="player-audio" :src="syn.audio_url" controls preload="auto"></audio>
-      </div>
-      <div class="meta-card">
-        <div><span class="k">syn_id:</span> <span class="v">{{ syn.syn_id }}</span></div>
-        <div><span class="k">mode:</span>   <span class="v">{{ syn.mode }}</span></div>
-        <div><span class="k">wall:</span>   <span class="v">{{ syn.wall_time_s.toFixed(1) }}s</span></div>
-        <div v-if="syn.composed_instruct">
-          <span class="k">instruct:</span> <span class="v">{{ syn.composed_instruct }}</span>
-        </div>
-      </div>
-
-      <div class="eval-card">
-        <div class="eval-title">
-          Objective Eval
-          <span class="status-pill" :class="'status-' + (evalStatus || 'idle')">{{ evalStatus || "idle" }}</span>
-        </div>
-        <div v-if="evalScores" class="eval-grid">
-          <div class="eval-cell" :class="'tier-' + tier('mos', evalScores.mos_nisqa)">
-            <div class="eval-k">MOS-NISQA</div>
-            <div class="eval-v">{{ fmt(evalScores.mos_nisqa, 2) }}</div>
-            <div class="eval-hint">naturalness · ≥4 good</div>
-          </div>
-          <div class="eval-cell" :class="'tier-' + tier('wer', evalScores.wer)">
-            <div class="eval-k">WER</div>
-            <div class="eval-v">{{ fmt(evalScores.wer, 3) }}</div>
-            <div class="eval-hint">intelligibility · ≤0.10 good</div>
-          </div>
-          <div class="eval-cell" :class="'tier-' + tier('secs', evalScores.secs)">
-            <div class="eval-k">SECS</div>
-            <div class="eval-v">{{ fmt(evalScores.secs, 3) }}</div>
-            <div class="eval-hint">speaker sim · ≥0.85 good</div>
-          </div>
-          <div class="eval-cell" :class="'tier-' + tier('f0', evalScores.f0_rmse_hz)">
-            <div class="eval-k">F0 RMSE</div>
-            <div class="eval-v">{{ fmt(evalScores.f0_rmse_hz, 1) }}<span class="unit"> Hz</span></div>
-            <div class="eval-hint">prosody · ≤30 good</div>
-          </div>
-        </div>
-        <div v-else-if="evalStatus === 'running'" class="eval-running">
-          evaluating... (~10–40s, runs in background)
-        </div>
-        <div v-else-if="evalStatus === 'error'" class="eval-error">
-          eval failed — check server logs
-        </div>
-      </div>
+    <div class="vinfo" v-else style="text-align:center; color: var(--fg-muted); font-style: italic;">
+      No active reference. Pick one from a tab above.
     </div>
   `,
 });
 
+
 // ---------------------------------------------------------------------------
-// FeedbackPanel — star rating + tag chips + note.
-// FeedbackPanel ——星标评分 + 标签 + 备注。
+// VoiceSourcePanel — Zone 1. 4-tab source picker. Each tab owns the form for
+// that source type; all backend chatter is routed through emit events so the
+// parent (app.js) keeps its existing fetch + polling logic.
+//
+// VoiceSourcePanel ——Zone 1 的四 tab 源选择器，子表单 emit 意图给父层。
 // ---------------------------------------------------------------------------
 
-const FEEDBACK_TAGS = [
-  "natural", "robotic", "style_off", "accent_off",
-  "pace_off", "muffled", "artifact", "good_match",
-];
+export const VoiceSourcePanel = defineComponent({
+  name: "VoiceSourcePanel",
+  components: { SourceTabs, ReferencePreview },
+  props: {
+    refs:           { type: Array,   required: true },  // small set: ?limit=200
+    selectedRefId:  { type: String,  default: "" },
+    // Bilibili pipeline state (from parent)
+    bilibiliProbing:       { type: Boolean, default: false },
+    bilibiliProbeResult:   { type: Object,  default: null },
+    bilibiliImporting:     { type: Boolean, default: false },
+    bilibiliError:         { type: String,  default: "" },
+    // Local upload state
+    uploading:             { type: Boolean, default: false },
+  },
+  emits: [
+    "update:selectedRefId",
+    "upload",
+    "bilibili-probe", "bilibili-import",
+    "youtube-extract",
+    "builtin-search",
+  ],
+  setup(props, { emit }) {
+    const activeTab = ref("bilibili");
+
+    // B 站 form
+    const bvUrl = ref("");
+    const bvStart = ref(null);
+    const bvEnd = ref(null);
+    const bvUseSubtitle = ref(true);
+
+    // YouTube form
+    const ytUrl = ref("");
+    const ytStart = ref(null);
+    const ytEnd = ref(null);
+
+    // Built-in search (debounced — re-fetches via emit)
+    const builtinQuery = ref("");
+    let builtinDebounce = null;
+    watch(builtinQuery, (q) => {
+      if (builtinDebounce) clearTimeout(builtinDebounce);
+      builtinDebounce = setTimeout(() => emit("builtin-search", q.trim()), 250);
+    });
+
+    // local upload
+    const onFile = (e) => {
+      const f = e.target.files && e.target.files[0];
+      if (f) emit("upload", f);
+      e.target.value = "";
+    };
+
+    const onProbe = () => {
+      if (!bvUrl.value.trim()) return;
+      emit("bilibili-probe", bvUrl.value.trim());
+    };
+    const onBiliImport = () => {
+      if (!bvUrl.value.trim()) return;
+      emit("bilibili-import", {
+        url: bvUrl.value.trim(),
+        start_sec: bvStart.value,
+        end_sec: bvEnd.value,
+        use_subtitle_as_prompt: bvUseSubtitle.value,
+      });
+    };
+    const onYtExtract = () => {
+      if (!ytUrl.value.trim()) return;
+      emit("youtube-extract", {
+        url: ytUrl.value.trim(),
+        start_sec: ytStart.value,
+        end_sec: ytEnd.value,
+      });
+    };
+
+    // refs are server-side filtered (sources prefiltered, search applied).
+    // Frontend just splits by source for the Uploaded vs Built-in tabs.
+    // refs 已被后端按 limit/source/search 过滤；前端只按 source 分两组显示。
+    const uploadedRefs = computed(() => props.refs.filter(r => r.source === "upload"));
+    const uploadedCount = computed(() => uploadedRefs.value.length);
+    const builtinRefs = computed(() => props.refs.filter(r => r.source === "builtin"));
+    const selectedRef = computed(() =>
+      props.refs.find(r => r.ref_id === props.selectedRefId) || null
+    );
+
+    return {
+      activeTab,
+      bvUrl, bvStart, bvEnd, bvUseSubtitle,
+      ytUrl, ytStart, ytEnd,
+      builtinQuery,
+      onFile, onProbe, onBiliImport, onYtExtract,
+      uploadedRefs, uploadedCount, builtinRefs, selectedRef,
+      onPick: (refId) => emit("update:selectedRefId", refId),
+    };
+  },
+  template: `
+    <section class="zone">
+      <h3 class="zone-title">Zone 1 · Voice Source</h3>
+
+      <SourceTabs v-model:active="activeTab" :uploadedCount="uploadedCount" />
+
+      <!-- B 站 tab -->
+      <template v-if="activeTab === 'bilibili'">
+        <div class="field">
+          <label class="field-label">URL / BV id</label>
+          <input type="text" class="select" v-model="bvUrl"
+                 :disabled="bilibiliProbing || bilibiliImporting"
+                 placeholder="https://www.bilibili.com/video/BVxxx or BV id" />
+        </div>
+        <div style="display:flex; gap:6px;">
+          <button class="btn-primary" style="background: var(--bg-elev); border-color: var(--bg-elev); color: var(--fg); font-weight: 500;"
+                  :disabled="bilibiliProbing || bilibiliImporting || !bvUrl.trim()"
+                  @click="onProbe">
+            {{ bilibiliProbing ? 'Probing…' : 'Probe' }}
+          </button>
+        </div>
+        <div v-if="bilibiliError" class="field-hint" style="color: var(--state-error); margin-top:6px;">
+          {{ bilibiliError }}
+        </div>
+
+        <div class="vinfo" v-if="bilibiliProbeResult">
+          <h4>{{ bilibiliProbeResult.title }}</h4>
+          <div class="row">
+            <span>UP <code>{{ bilibiliProbeResult.uploader }}</code></span>
+            <span>{{ bilibiliProbeResult.duration.toFixed(1) }}s · {{ bilibiliProbeResult.parts.length }} part(s)</span>
+            <span v-if="bilibiliProbeResult.available_subtitles.length">
+              subs: {{ bilibiliProbeResult.available_subtitles.join(', ') }}
+            </span>
+            <span v-else style="color: var(--fg-muted)">no subs</span>
+          </div>
+          <div class="field" style="margin-top: 10px;">
+            <label class="field-label">Clip range (sec) · 推荐 20–40s 做 ref</label>
+            <div style="display:flex; gap:6px; align-items:center;">
+              <input type="number" style="width:80px;" class="select" min="0" step="0.5"
+                     v-model.number="bvStart" :disabled="bilibiliImporting" placeholder="start" />
+              <span style="color: var(--fg-muted)">→</span>
+              <input type="number" style="width:80px;" class="select" min="0" step="0.5"
+                     v-model.number="bvEnd" :disabled="bilibiliImporting" placeholder="end" />
+              <span style="color: var(--fg-muted); font-family: var(--font-mono); font-size:11px;">
+                = {{ (bvEnd != null && bvStart != null) ? (bvEnd - bvStart).toFixed(1) + 's' : '—' }}
+              </span>
+            </div>
+          </div>
+          <div class="field" v-if="bilibiliProbeResult.available_subtitles.length">
+            <label style="display:flex; align-items:center; gap:6px; font-weight:normal; font-size:12px;">
+              <input type="checkbox" v-model="bvUseSubtitle" :disabled="bilibiliImporting" />
+              Use official subtitle as prompt_text (skips ASR)
+            </label>
+          </div>
+          <button class="btn-primary"
+                  :disabled="bilibiliImporting" @click="onBiliImport">
+            {{ bilibiliImporting ? 'Importing…' : 'Extract → reference' }}
+          </button>
+        </div>
+      </template>
+
+      <!-- YouTube tab -->
+      <template v-if="activeTab === 'youtube'">
+        <div class="field">
+          <label class="field-label">YouTube URL</label>
+          <input type="text" class="select" v-model="ytUrl"
+                 placeholder="https://www.youtube.com/watch?v=..." />
+        </div>
+        <div class="field">
+          <label class="field-label">Clip range (sec, optional)</label>
+          <div style="display:flex; gap:6px; align-items:center;">
+            <input type="number" style="width:80px;" class="select" min="0" step="0.5"
+                   v-model.number="ytStart" placeholder="start" />
+            <span style="color: var(--fg-muted)">→</span>
+            <input type="number" style="width:80px;" class="select" min="0" step="0.5"
+                   v-model.number="ytEnd" placeholder="end" />
+          </div>
+        </div>
+        <button class="btn-primary" :disabled="!ytUrl.trim()" @click="onYtExtract">
+          Extract → dataset
+        </button>
+        <div class="field-hint" style="margin-top:6px;">
+          YouTube extraction goes through the full ingest pipeline (Demucs → VAD → ASR → manifest).
+          Watch Zone 2 for live progress.
+        </div>
+      </template>
+
+      <!-- Upload tab -->
+      <template v-if="activeTab === 'upload'">
+        <div class="field">
+          <label class="field-label">Upload local audio</label>
+          <input type="file" class="file-input"
+                 accept="audio/wav,audio/mpeg,audio/x-wav,.wav,.mp3"
+                 :disabled="uploading"
+                 @change="onFile" />
+          <div v-if="uploading" class="field-hint">uploading + auto-ASR... (5–15s)</div>
+        </div>
+        <div class="field-hint">
+          Drop a clean 20–60s clip of one speaker. ASR will auto-transcribe;
+          you can edit the prompt_text afterwards.
+        </div>
+      </template>
+
+      <!-- Uploaded tab — user's previously imported refs (cheap, small set) -->
+      <template v-if="activeTab === 'uploaded'">
+        <div class="field-hint" style="margin-bottom: 6px;">
+          {{ uploadedCount }} uploaded / imported reference(s). Click to select.
+        </div>
+        <div v-if="!uploadedCount" class="field-hint" style="font-style: italic;">
+          None yet. Use B 站 URL / YouTube / Upload tabs to add one.
+        </div>
+        <div v-for="r in uploadedRefs" :key="r.ref_id"
+             style="padding:8px 10px; margin-bottom:4px; background: var(--bg); border-radius:6px; border: 1px solid var(--border); cursor:pointer;"
+             :style="r.ref_id === selectedRefId ? 'border-color: var(--cta);' : ''"
+             @click="onPick(r.ref_id)">
+          <div style="font-family: var(--font-mono); font-size: 11px; color: var(--fg-muted);">
+            {{ r.ref_id }} · {{ r.duration ? r.duration.toFixed(1)+'s' : '—' }}
+            <span v-if="r.ref_id === selectedRefId" style="color: var(--cta); margin-left: 6px;">✓ selected</span>
+          </div>
+          <div style="font-size: 12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
+            {{ r.prompt_text || '(no prompt_text)' }}
+          </div>
+        </div>
+      </template>
+
+      <!-- Built-in tab — server-paginated. Search box debounces a refetch. -->
+      <template v-if="activeTab === 'builtin'">
+        <div class="field">
+          <label class="field-label">Search built-in references</label>
+          <input type="text" class="select" v-model="builtinQuery"
+                 placeholder="search by ref_id / dataset / prompt_text..." />
+          <div class="field-hint">
+            Showing {{ builtinRefs.length }} matches (server-capped at 200).
+            Refine with search to narrow down.
+          </div>
+        </div>
+        <div v-for="r in builtinRefs.slice(0, 50)" :key="r.ref_id"
+             style="padding:6px 10px; margin-bottom:3px; background: var(--bg); border-radius:6px; border: 1px solid var(--border); cursor:pointer;"
+             :style="r.ref_id === selectedRefId ? 'border-color: var(--cta);' : ''"
+             @click="onPick(r.ref_id)">
+          <div style="font-family: var(--font-mono); font-size: 11px;">
+            <span style="color: var(--accent-voice);">[{{ r.dataset || '?' }}]</span>
+            {{ r.ref_id }}
+            <span style="color: var(--fg-muted);">· {{ r.duration ? r.duration.toFixed(1)+'s' : '—' }}</span>
+            <span v-if="r.ref_id === selectedRefId" style="color: var(--cta); margin-left: 6px;">✓</span>
+          </div>
+        </div>
+        <div v-if="builtinRefs.length > 50" class="field-hint" style="text-align:center;">
+          (showing first 50 of {{ builtinRefs.length }} — refine search to see more)
+        </div>
+      </template>
+
+      <!-- Active reference preview, always shown -->
+      <div style="margin-top: 12px;">
+        <ReferencePreview :audio="selectedRef" />
+      </div>
+    </section>
+  `,
+});
+
+
+// ---------------------------------------------------------------------------
+// SynthesisPanel — Zone 3. Text input + voice config + Run + player + scores.
+// Replaces the TextPanel / ConfigPanel / ActionBar / PlayerPanel trio with
+// one denser bento card.
+//
+// SynthesisPanel ——Zone 3，把原来的 Text/Config/Action/Player 四个 panel
+// 合并成一张密度更高的合成卡片，附带评分小卡片。
+// ---------------------------------------------------------------------------
+
+export const SynthesisPanel = defineComponent({
+  name: "SynthesisPanel",
+  props: {
+    text:        { type: String, default: "" },
+    mode:        { type: String, default: "zero_shot" },
+    // NOTE: `config` is passed as a reactive object from the parent. We
+    // mutate fields in place via `set-config-field` (not v-model:config),
+    // because v-model:config would try to reassign a reactive const which
+    // either breaks reactivity or throws.
+    // 注意：parent 的 config 是 reactive 常量。我们通过 set-config-field 事件
+    // 让 parent 原地改字段，不用 v-model:config（会试图整体重新赋值）。
+    config:      { type: Object, required: true },
+    composed:    { type: String, default: "" },
+    selectedRefId: { type: String, default: "" },
+    runStatus:   { type: String, default: "idle" },
+    statusMessage: { type: String, default: "" },
+    lastSyn:     { type: Object, default: null },
+    evalStatus:  { type: String, default: "" },
+    evalScores:  { type: Object, default: null },
+  },
+  emits: ["update:text", "update:mode", "set-config-field", "synthesize"],
+  setup(props, { emit }) {
+    const onText = (e) => emit("update:text", e.target.value);
+    const onMode = (e) => emit("update:mode", e.target.value);
+    // Single-field mutation event — parent does `config.k = v` in place to
+    // preserve the reactive object identity.
+    // 单字段事件——parent 原地 config.k = v，保持 reactive 对象 identity。
+    const setCfg = (k, v) => emit("set-config-field", { key: k, value: v });
+
+    const evalDot = computed(() => {
+      const e = props.evalStatus;
+      if (e === "done") return "ok";
+      if (e === "running") return "run";
+      if (e === "error") return "err";
+      return "";
+    });
+
+    // Compute the precise reason synth is disabled, so the user sees WHY.
+    // 精确给出 synth 被禁用的原因，让用户一眼看到为啥点不了。
+    const disabledReason = computed(() => {
+      if (props.runStatus === "running") return "synthesising — please wait";
+      const missing = [];
+      if (!props.selectedRefId) missing.push("pick a reference (Zone 1)");
+      if (!props.text || !props.text.trim()) missing.push("type target text");
+      if (props.mode === "instruct" && !props.composed) {
+        missing.push("fill at least one voice config field");
+      }
+      return missing.length ? "need: " + missing.join(" · ") : "";
+    });
+    const canRun = computed(() => !disabledReason.value);
+
+    return { onText, onMode, setCfg, evalDot, disabledReason, canRun };
+  },
+  template: `
+    <section class="zone zone-full">
+      <h3 class="zone-title">Zone 3 · Synthesis</h3>
+      <div class="synth-grid">
+        <div>
+          <div class="field">
+            <label class="field-label">Target text</label>
+            <textarea class="textarea textarea-tall"
+                      :value="text" @input="onText"
+                      placeholder="It's great to be back in Beijing, truly fantastic..."></textarea>
+          </div>
+          <div class="field">
+            <label class="field-label">Mode</label>
+            <select class="select" :value="mode" @change="onMode">
+              <option value="zero_shot">zero_shot — copy ref voice directly</option>
+              <option value="instruct">instruct — compose voice from config</option>
+            </select>
+          </div>
+        </div>
+
+        <div>
+          <div class="card-title" style="margin-bottom: 4px;">Voice config (instruct mode)</div>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+            <div class="field">
+              <label class="field-label">Language</label>
+              <select class="select" :value="config.language"
+                      @change="e => setCfg('language', e.target.value)">
+                <option value="English">English</option>
+                <option value="Chinese">Chinese</option>
+              </select>
+            </div>
+            <div class="field">
+              <label class="field-label">Gender</label>
+              <select class="select" :value="config.gender || ''"
+                      @change="e => setCfg('gender', e.target.value || null)">
+                <option value="">—</option>
+                <option value="male">male</option>
+                <option value="female">female</option>
+              </select>
+            </div>
+            <div class="field">
+              <label class="field-label">Age</label>
+              <select class="select" :value="config.age || ''"
+                      @change="e => setCfg('age', e.target.value || null)">
+                <option value="">—</option>
+                <option value="young">young</option>
+                <option value="middle">middle</option>
+                <option value="old">old</option>
+              </select>
+            </div>
+            <div class="field">
+              <label class="field-label">Quality</label>
+              <select class="select" :value="config.quality || ''"
+                      @change="e => setCfg('quality', e.target.value || null)">
+                <option value="">—</option>
+                <option value="studio">studio</option>
+                <option value="broadcast">broadcast</option>
+                <option value="casual">casual</option>
+              </select>
+            </div>
+          </div>
+          <div class="field">
+            <label class="field-label">Persona / Emotion / Description (free text)</label>
+            <input class="select" :value="config.persona"
+                   @input="e => setCfg('persona', e.target.value)"
+                   placeholder="persona: e.g. 'confident teacher'" />
+            <input class="select" style="margin-top:6px;" :value="config.emotion"
+                   @input="e => setCfg('emotion', e.target.value)"
+                   placeholder="emotion: e.g. 'calm, warm'" />
+            <input class="select" style="margin-top:6px;" :value="config.description"
+                   @input="e => setCfg('description', e.target.value)"
+                   placeholder="description: 1-2 sentences on timbre / pacing / delivery" />
+          </div>
+          <div v-if="mode === 'instruct' && composed" class="field-hint" style="margin-top:4px;">
+            <code style="color: var(--accent-voice);">{{ composed }}</code>
+          </div>
+        </div>
+      </div>
+
+      <div style="display:flex; gap:8px; align-items:center; margin-top: 12px; flex-wrap: wrap;">
+        <button class="btn-primary" style="padding: 10px 22px;"
+                :disabled="!canRun"
+                @click="$emit('synthesize')">
+          {{ runStatus === 'running' ? '▶ Synthesising…' : '▶ Synthesize' }}
+        </button>
+        <span v-if="disabledReason"
+              class="field-hint mono"
+              style="color: var(--state-error); background: rgba(239,68,68,0.08); padding: 4px 8px; border-radius: 4px;">
+          ⓘ {{ disabledReason }}
+        </span>
+        <span v-else class="field-hint mono" style="color: var(--fg-muted);">
+          {{ statusMessage }}
+        </span>
+        <span style="margin-left: auto; font-family: var(--font-mono); font-size: 11px; color: var(--fg-muted);">
+          <template v-if="lastSyn">
+            last: {{ lastSyn.wall_time_s.toFixed(1) }}s ·
+            <code>{{ lastSyn.syn_id.slice(-9) }}</code> ·
+            <span :class="evalDot === 'ok' ? 'ok' : evalDot === 'err' ? 'err' : 'run'"
+                  :style="{color: evalDot === 'ok' ? 'var(--state-done)'
+                                : evalDot === 'err' ? 'var(--state-error)'
+                                : 'var(--state-running)'}">
+              {{ evalStatus === 'done' ? '✓ eval done' :
+                 evalStatus === 'error' ? '✗ eval error' :
+                 evalStatus === 'running' ? '⏳ eval running' : '— no eval' }}
+            </span>
+          </template>
+        </span>
+      </div>
+
+      <!-- Player -->
+      <div v-if="lastSyn" style="margin-top: 12px;">
+        <audio controls :src="lastSyn.audio_url" style="width:100%; height:32px;"></audio>
+      </div>
+
+      <!-- Score cards -->
+      <div class="scores" v-if="evalScores">
+        <div class="score-card">
+          <div class="v green">{{ evalScores.secs != null ? evalScores.secs.toFixed(3) : '—' }}</div>
+          <div class="l">SECS</div>
+        </div>
+        <div class="score-card">
+          <div class="v">{{ evalScores.mos_nisqa != null ? evalScores.mos_nisqa.toFixed(2) : '—' }}</div>
+          <div class="l">MOS NISQA</div>
+        </div>
+        <div class="score-card">
+          <div class="v blue">{{ evalScores.cer != null ? evalScores.cer.toFixed(2) : (evalScores.wer != null ? evalScores.wer.toFixed(2) : '—') }}</div>
+          <div class="l">{{ evalScores.cer != null ? 'CER' : 'WER' }}</div>
+        </div>
+        <div class="score-card">
+          <div class="v">{{ evalScores.f0_rmse_hz != null ? evalScores.f0_rmse_hz.toFixed(1) + ' Hz' : '—' }}</div>
+          <div class="l">F0 RMSE</div>
+        </div>
+      </div>
+    </section>
+  `,
+});
+
+
+// ---------------------------------------------------------------------------
+// FeedbackPanel — listening rating + tags. Light restyle of the v1 panel.
+// FeedbackPanel ——听感打分，沿用 v1 逻辑，仅外观跟新主题对齐。
+// ---------------------------------------------------------------------------
 
 export const FeedbackPanel = defineComponent({
   name: "FeedbackPanel",
@@ -604,93 +848,95 @@ export const FeedbackPanel = defineComponent({
     const rating = ref(0);
     const tags = ref([]);
     const note = ref("");
-
-    // Reset when a new syn comes in.
-    watch(() => props.synId, () => { rating.value = 0; tags.value = []; note.value = ""; });
-
+    const ALL_TAGS = ["natural", "robotic", "mispronounce", "wrong-emotion", "great"];
     const toggleTag = (t) => {
-      if (tags.value.includes(t)) tags.value = tags.value.filter((x) => x !== t);
-      else tags.value = [...tags.value, t];
+      const i = tags.value.indexOf(t);
+      if (i >= 0) tags.value.splice(i, 1); else tags.value.push(t);
     };
-
     const submit = () => {
-      if (!rating.value) return;
-      emit("submit", { syn_id: props.synId, rating: rating.value, tags: tags.value, note: note.value });
+      if (!props.synId || !rating.value) return;
+      emit("submit", {
+        syn_id: props.synId, rating: rating.value,
+        tags: [...tags.value], note: note.value,
+      });
     };
-
-    return { rating, tags, note, toggleTag, submit, FEEDBACK_TAGS };
+    watch(() => props.synId, () => {
+      rating.value = 0; tags.value = []; note.value = "";
+    });
+    return { rating, tags, note, ALL_TAGS, toggleTag, submit };
   },
   template: `
-    <div class="card" v-if="synId">
-      <div class="card-title">Feedback (this is the "reward signal" for listening policy)</div>
-
-      <div class="field">
-        <label class="field-label">Rating</label>
-        <div class="stars">
-          <span v-for="n in 5" :key="n"
-                class="star"
-                :class="{ 'is-active': n <= rating }"
-                @click="rating = n">★</span>
+    <div class="card">
+      <div class="card-title">Feedback</div>
+      <div v-if="!synId" class="field-hint">Synthesize first to leave feedback.</div>
+      <template v-else>
+        <div class="field">
+          <label class="field-label">Rating</label>
+          <div style="display:flex; gap:6px;">
+            <button v-for="n in 5" :key="n"
+                    class="tab"
+                    :class="{active: rating === n}"
+                    @click="rating = n">{{ n }}★</button>
+          </div>
         </div>
-        <div class="field-hint">5 = ship-ready · 4 = natural but off-style · 3 = usable with artifacts · 2 = degraded · 1 = unusable</div>
-      </div>
-
-      <div class="field">
-        <label class="field-label">Tags</label>
-        <div class="tag-row">
-          <span v-for="t in FEEDBACK_TAGS" :key="t"
-                class="tag-chip"
-                :class="{ 'is-active': tags.includes(t) }"
-                @click="toggleTag(t)">{{ t }}</span>
+        <div class="field">
+          <label class="field-label">Tags (multi-select)</label>
+          <div style="display:flex; gap:4px; flex-wrap: wrap;">
+            <button v-for="t in ALL_TAGS" :key="t"
+                    class="tab"
+                    :class="{active: tags.includes(t)}"
+                    @click="toggleTag(t)">{{ t }}</button>
+          </div>
         </div>
-      </div>
-
-      <div class="field">
-        <label class="field-label">Note (optional)</label>
-        <textarea class="textarea" v-model="note"
-                  placeholder="e.g. 'slightly too calm', 'accent leaks in the second sentence'"></textarea>
-      </div>
-
-      <div class="feedback-actions">
-        <button class="btn" :disabled="!rating" @click="submit">Submit Feedback</button>
-        <span v-if="saved" class="feedback-saved">✓ saved</span>
-      </div>
+        <div class="field">
+          <label class="field-label">Note (optional)</label>
+          <textarea class="textarea" v-model="note" placeholder="anything specific?"></textarea>
+        </div>
+        <button class="btn-primary"
+                :disabled="!rating || saved"
+                @click="submit">
+          {{ saved ? 'Saved ✓' : 'Submit feedback' }}
+        </button>
+      </template>
     </div>
   `,
 });
 
+
 // ---------------------------------------------------------------------------
-// HistoryPanel — list past syntheses with quick replay.
-// HistoryPanel ——历史合成列表，可快速重听。
+// HistoryPanel — past synth list. Click to replay.
+// HistoryPanel ——历史合成列表，点击重听。
 // ---------------------------------------------------------------------------
 
 export const HistoryPanel = defineComponent({
   name: "HistoryPanel",
   props: {
-    items: { type: Array, default: () => [] },
+    items: { type: Array, required: true },
   },
   emits: ["replay"],
-  setup(_, { emit }) {
-    return { replay: (item) => emit("replay", item) };
+  setup(props, { emit }) {
+    return { onReplay: (it) => emit("replay", it) };
   },
   template: `
-    <div class="card" v-if="items.length">
-      <div class="card-title">History</div>
-      <div v-for="it in items" :key="it.syn_id" class="history-row">
-        <div>
-          <div class="history-text">{{ it.text }}</div>
-          <div class="history-meta">
-            {{ it.timestamp.slice(0,16).replace('T',' ') }} ·
-            {{ it.mode }} ·
-            ref={{ it.ref_id.slice(0,40) }} ·
+    <div class="card">
+      <div class="card-title">History · {{ items.length }} entries</div>
+      <div v-if="!items.length" class="field-hint">No synthesises yet.</div>
+      <div v-for="it in items" :key="it.syn_id"
+           style="padding:8px 0; border-bottom: 1px solid var(--border); display:flex; gap:8px; align-items:center;">
+        <button class="tab" @click="onReplay(it)">▶ replay</button>
+        <div style="flex:1; min-width: 0;">
+          <div style="font-family: var(--font-mono); font-size: 11px; color: var(--fg-muted);">
+            {{ it.timestamp.replace('T',' ').slice(0,19) }} ·
+            ref={{ it.ref_id.slice(0, 32) }} · {{ it.mode }} ·
             {{ it.wall_time_s.toFixed(1) }}s
+            <span v-if="it.eval && it.eval.secs != null"
+                  :style="{color: 'var(--state-done)'}">
+              · SECS {{ it.eval.secs.toFixed(3) }}
+            </span>
           </div>
-        </div>
-        <div style="display:flex; align-items:center; gap:8px;">
-          <span class="history-rating" v-if="it.feedback">
-            {{ '★'.repeat(it.feedback.rating) }}{{ '☆'.repeat(5 - it.feedback.rating) }}
-          </span>
-          <button class="radio-btn" @click="replay(it)">replay</button>
+          <div style="overflow:hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px;">
+            {{ it.text }}
+          </div>
         </div>
       </div>
     </div>

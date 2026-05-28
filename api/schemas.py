@@ -159,6 +159,56 @@ class StageState(BaseModel):
     detail: str = ""
 
 
+class IngestRequest(BaseModel):
+    """Body of POST /api/dataset/ingest — kick off a full M1 pipeline run.
+
+    POST /api/dataset/ingest 的请求体——触发完整 M1 数据管线
+    （Source → Preprocess → Dataset）的后台运行。
+
+    Source-specific fields are optional and validated by the handler:
+    - source=local      → name + (optional inputs_root)
+    - source=kaggle     → name + dataset_id
+    - source=bilibili   → name + url (+ optional time_range)
+    - source=youtube    → name + url (+ optional time_range)
+    """
+
+    source: Literal["local", "kaggle", "bilibili", "youtube"]
+    name: str = Field(min_length=1)
+    url: str | None = None
+    dataset_id: str | None = None
+    start_sec: float | None = Field(default=None, ge=0)
+    end_sec: float | None = Field(default=None, gt=0)
+    lang_hint: str | None = None
+    is_single_speaker: bool = False
+    needs_separation: bool = True
+
+
+class IngestJob(BaseModel):
+    """Status of one async M1 ingest job, polled by the UI.
+
+    一次 M1 ingest 异步任务的状态——前端轮询读取。
+
+    Status flow:
+        queued → running → done
+                         → error
+
+    Stages array gives the granular SourceAgent / PreprocessAgent /
+    DatasetAgent timeline that PipelineCard renders.
+    stages 数组给出 SourceAgent / PreprocessAgent / DatasetAgent 三段
+    的细粒度时间线，前端 PipelineCard 直接渲染。
+    """
+
+    job_id: str
+    status: Literal["queued", "running", "done", "error"]
+    stages: list[StageState] = Field(default_factory=list)
+    name: str
+    source: str
+    manifest_path: str | None = None
+    n_chunks: int | None = None
+    total_duration_s: float | None = None
+    error: str | None = None
+
+
 class BilibiliImportJob(BaseModel):
     """Status of one async Bilibili import job — polled by the UI.
 

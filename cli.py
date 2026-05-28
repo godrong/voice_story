@@ -74,10 +74,21 @@ def _setup_logging(verbose: bool) -> None:
 
 @app.command()
 def ingest(
-    source: str = typer.Option(..., help="Source plugin: 'local' or 'kaggle'."),
+    source: str = typer.Option(
+        ..., help="Source plugin: 'local' / 'kaggle' / 'bilibili' / 'youtube'.",
+    ),
     name: str = typer.Option(..., help="Speaker / dataset short name."),
     dataset_id: str = typer.Option(
         None, help="Kaggle dataset id (owner/slug). Required if --source kaggle.",
+    ),
+    url: str = typer.Option(
+        None, help="Video URL or BV id. Required if --source bilibili/youtube.",
+    ),
+    start_sec: float = typer.Option(
+        None, help="Optional time-range start (sec). Pairs with --end-sec.",
+    ),
+    end_sec: float = typer.Option(
+        None, help="Optional time-range end (sec). Pairs with --start-sec.",
     ),
     inputs_root: Path = typer.Option(
         Path("inputs"), help="Inputs root for --source local.",
@@ -124,6 +135,11 @@ def ingest(
     _setup_logging(verbose)
     if source == "kaggle" and not dataset_id:
         raise typer.BadParameter("--dataset-id is required when --source kaggle")
+    if source in ("bilibili", "youtube") and not url:
+        raise typer.BadParameter(f"--url is required when --source {source}")
+    if (start_sec is None) ^ (end_sec is None):
+        raise typer.BadParameter("--start-sec and --end-sec must be provided together")
+    time_range = (start_sec, end_sec) if start_sec is not None else None
 
     if source == "local":
         source_kwargs = {
@@ -141,8 +157,21 @@ def ingest(
             "needs_separation": needs_separation,
             "is_single_speaker": is_single_speaker,
         }
+    elif source in ("bilibili", "youtube"):
+        source_kwargs = {
+            "name": name,
+            "url": url,
+            "inputs_root": inputs_root,
+            "time_range": time_range,
+            "lang_hint": lang_hint,
+            "needs_separation": needs_separation,
+            "is_single_speaker": is_single_speaker,
+        }
     else:
-        raise typer.BadParameter(f"Unknown --source {source!r} (use 'local' or 'kaggle')")
+        raise typer.BadParameter(
+            f"Unknown --source {source!r} "
+            f"(use 'local' / 'kaggle' / 'bilibili' / 'youtube')"
+        )
 
     thresholds = FilterThresholds(
         min_mos_ovr=min_mos, min_confidence=min_conf,

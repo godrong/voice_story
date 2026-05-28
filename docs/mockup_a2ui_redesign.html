@@ -1,0 +1,510 @@
+<!doctype html>
+<!--
+  Mockup: voice_story redesign — Dark Mode OLED + Developer Tool palette +
+  Voice-First identity + A2UI DAG (Cytoscape.js).
+
+  Static mockup. No live backend. All numbers are illustrative.
+  Open with: open docs/mockup_a2ui_redesign.html
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>voice_story — Redesign mockup (A2UI + UI/UX Pro Max)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Fira+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
+  <style>
+    :root {
+      --bg:          #0F172A;
+      --surface:     #1E293B;
+      --surface-2:   #334155;
+      --border:      #1F2A3D;
+      --text:        #F8FAFC;
+      --text-muted:  #94A3B8;
+      --cta:         #22C55E;
+      --cta-hover:   #16A34A;
+      --state-running: #6B8FAF;
+      --state-done:    #22C55E;
+      --state-error:   #EF4444;
+      --state-pending: #475569;
+      --accent-voice:  #9B8FBB;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Fira Sans', -apple-system, system-ui, sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    .mono { font-family: 'Fira Code', monospace; }
+    code, kbd { font-family: 'Fira Code', monospace; color: var(--accent-voice); }
+
+    /* Header */
+    header {
+      padding: 14px 24px;
+      border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    header h1 {
+      font-size: 16px; margin: 0; font-weight: 600;
+    }
+    header h1 .accent { color: var(--cta); }
+    header .meta { color: var(--text-muted); font-size: 12px; font-family: 'Fira Code', monospace; }
+
+    /* Main grid: 3 zones — left voice source, right pipeline graph (top); bottom synth */
+    main {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      grid-template-rows: minmax(420px, auto) auto;
+      gap: 16px;
+      padding: 16px 24px 24px;
+    }
+    .zone {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+      display: flex; flex-direction: column;
+    }
+    .zone-title {
+      font-family: 'Fira Code', monospace;
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin: 0 0 12px;
+    }
+    .zone-3 { grid-column: span 2; }
+
+    /* Tabs (source) */
+    .tabs { display: flex; gap: 4px; margin-bottom: 12px; }
+    .tab {
+      padding: 6px 12px;
+      font-size: 12px;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text-muted);
+      cursor: pointer;
+    }
+    .tab.active {
+      background: var(--surface-2);
+      color: var(--text);
+      border-color: var(--surface-2);
+    }
+    .tab .badge {
+      margin-left: 6px; padding: 0 6px; border-radius: 8px;
+      background: var(--cta); color: var(--bg); font-size: 10px;
+      font-family: 'Fira Code', monospace;
+    }
+
+    /* Fields */
+    .field { margin-bottom: 10px; }
+    .field label {
+      display: block; font-size: 11px; color: var(--text-muted);
+      margin-bottom: 4px; font-family: 'Fira Code', monospace;
+      letter-spacing: 0.04em;
+    }
+    .field input, .field select, .field textarea {
+      width: 100%;
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font-family: 'Fira Code', monospace;
+      font-size: 13px;
+    }
+    .field input:focus, .field select:focus {
+      outline: none;
+      border-color: var(--state-running);
+      box-shadow: 0 0 0 2px rgba(107,143,175,0.15);
+    }
+
+    /* Buttons */
+    .btn {
+      padding: 8px 14px;
+      border: 1px solid var(--surface-2);
+      background: var(--surface-2);
+      color: var(--text);
+      border-radius: 6px;
+      font-family: 'Fira Sans', sans-serif;
+      font-weight: 500;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .btn:hover { background: var(--border); }
+    .btn-primary {
+      background: var(--cta);
+      border-color: var(--cta);
+      color: #052e16;
+      font-weight: 600;
+    }
+    .btn-primary:hover { background: var(--cta-hover); border-color: var(--cta-hover); }
+    .btn-row { display: flex; gap: 8px; margin-top: 6px; }
+
+    /* Video info card after probe */
+    .vinfo {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      margin-top: 10px;
+    }
+    .vinfo h4 { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
+    .vinfo .row {
+      display: flex; gap: 12px; color: var(--text-muted);
+      font-family: 'Fira Code', monospace; font-size: 11px;
+    }
+
+    /* Waveform placeholder */
+    .waveform {
+      height: 44px;
+      background: linear-gradient(180deg, transparent, var(--bg));
+      border-radius: 6px;
+      margin: 8px 0;
+      position: relative;
+      overflow: hidden;
+    }
+    .waveform svg { width: 100%; height: 100%; display: block; }
+    .play-row {
+      display: flex; align-items: center; gap: 10px;
+      font-family: 'Fira Code', monospace; font-size: 11px; color: var(--text-muted);
+    }
+    .play-btn {
+      width: 28px; height: 28px; border-radius: 50%;
+      border: 1px solid var(--surface-2); background: var(--surface-2);
+      color: var(--text); cursor: pointer; font-size: 11px;
+    }
+
+    /* DAG canvas */
+    #cy {
+      flex: 1;
+      min-height: 360px;
+      background: var(--bg);
+      border-radius: 8px;
+      border: 1px solid var(--border);
+    }
+    .legend {
+      display: flex; gap: 12px; margin-top: 8px;
+      font-family: 'Fira Code', monospace; font-size: 11px; color: var(--text-muted);
+    }
+    .legend .dot {
+      display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+      margin-right: 4px; vertical-align: middle;
+    }
+
+    /* DAG side panel — shown when a node is clicked */
+    .dag-wrap { display: grid; grid-template-columns: 1fr 200px; gap: 12px; flex: 1; }
+    .node-detail {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      font-family: 'Fira Code', monospace;
+      font-size: 11px;
+    }
+    .node-detail .nd-title { color: var(--text); font-weight: 600; margin-bottom: 6px; font-size: 12px; }
+    .node-detail .nd-row { display: flex; justify-content: space-between; color: var(--text-muted); margin-bottom: 4px; }
+    .node-detail .nd-row .v { color: var(--text); }
+    .node-detail .nd-log {
+      background: var(--surface);
+      padding: 6px 8px;
+      border-radius: 4px;
+      margin-top: 8px;
+      color: var(--text-muted);
+      font-size: 10px;
+      max-height: 100px;
+      overflow-y: auto;
+    }
+
+    /* Synthesize zone — split into Text + Voice config + Player */
+    .synth-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    .synth-text textarea { min-height: 100px; resize: vertical; }
+    .voice-cfg .row {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+    }
+    .scores {
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;
+      margin-top: 10px;
+    }
+    .score-card {
+      background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+      padding: 8px 10px;
+    }
+    .score-card .v {
+      font-family: 'Fira Code', monospace; font-size: 20px; font-weight: 600;
+      color: var(--text);
+    }
+    .score-card .v.green { color: var(--state-done); }
+    .score-card .v.blue  { color: var(--state-running); }
+    .score-card .l { font-size: 10px; color: var(--text-muted); margin-top: 2px;
+                     font-family: 'Fira Code', monospace; letter-spacing: 0.04em; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1><span class="accent">▸</span> voice_story <span style="color: var(--text-muted); font-weight: 400; margin-left: 8px; font-family: 'Fira Code', monospace; font-size: 12px;">TTS · v0.1.4 · dark</span></h1>
+    <div class="meta">GPU: idle · TTS worker: <span style="color: var(--state-done)">ready</span></div>
+  </header>
+
+  <main>
+    <!-- ZONE 1: VOICE SOURCE -->
+    <section class="zone">
+      <h3 class="zone-title">Zone 1 · Voice Source</h3>
+      <div class="tabs">
+        <button class="tab active">B站 URL</button>
+        <button class="tab">YouTube</button>
+        <button class="tab">Upload</button>
+        <button class="tab">Built-in <span class="badge">12</span></button>
+      </div>
+
+      <div class="field">
+        <label>URL / BV id</label>
+        <input value="BV1SzdwBfEeB" />
+      </div>
+
+      <div class="vinfo">
+        <h4>大G口腔溃疡，疼痛难忍：我现在火气很大！</h4>
+        <div class="row">
+          <span>UP <code>我才是熊猫大G</code></span>
+          <span>563.5s · 1 part · no subs</span>
+        </div>
+        <div class="field" style="margin-top: 10px;">
+          <label>Clip range (sec) · 推荐 20–40s 做 ref</label>
+          <div style="display:flex; gap:6px; align-items:center;">
+            <input style="width:80px;" value="120" />
+            <span style="color: var(--text-muted)">→</span>
+            <input style="width:80px;" value="150" />
+            <span style="color: var(--text-muted); font-family:'Fira Code', monospace; font-size:11px;">= 30.0s</span>
+          </div>
+        </div>
+        <div class="btn-row">
+          <button class="btn">Probe</button>
+          <button class="btn btn-primary">Extract → reference</button>
+        </div>
+      </div>
+
+      <!-- Active reference preview -->
+      <div class="vinfo" style="margin-top: 12px;">
+        <h4 style="display:flex; justify-content:space-between;">
+          <span>Active reference</span>
+          <code style="font-size: 10px; color: var(--text-muted);">upload_…a5da · 20.0s</code>
+        </h4>
+        <div class="waveform">
+          <svg viewBox="0 0 400 44" preserveAspectRatio="none">
+            <g fill="#6B8FAF">
+              <rect x="0"   y="20" width="2" height="4"/><rect x="4"   y="18" width="2" height="8"/>
+              <rect x="8"   y="14" width="2" height="16"/><rect x="12"  y="6"  width="2" height="32"/>
+              <rect x="16"  y="10" width="2" height="24"/><rect x="20"  y="16" width="2" height="12"/>
+              <rect x="24"  y="8"  width="2" height="28"/><rect x="28"  y="4"  width="2" height="36"/>
+              <rect x="32"  y="12" width="2" height="20"/><rect x="36"  y="6"  width="2" height="32"/>
+              <rect x="40"  y="14" width="2" height="16"/><rect x="44"  y="10" width="2" height="24"/>
+              <rect x="48"  y="16" width="2" height="12"/><rect x="52"  y="6"  width="2" height="32"/>
+              <rect x="56"  y="2"  width="2" height="40"/><rect x="60"  y="14" width="2" height="16"/>
+              <rect x="64"  y="8"  width="2" height="28"/><rect x="68"  y="18" width="2" height="8"/>
+              <rect x="72"  y="12" width="2" height="20"/><rect x="76"  y="6"  width="2" height="32"/>
+              <rect x="80"  y="10" width="2" height="24"/><rect x="84"  y="14" width="2" height="16"/>
+              <rect x="88"  y="4"  width="2" height="36"/><rect x="92"  y="16" width="2" height="12"/>
+              <rect x="96"  y="8"  width="2" height="28"/><rect x="100" y="20" width="2" height="4"/>
+              <rect x="104" y="14" width="2" height="16"/><rect x="108" y="6"  width="2" height="32"/>
+              <rect x="112" y="12" width="2" height="20"/><rect x="116" y="10" width="2" height="24"/>
+              <rect x="120" y="16" width="2" height="12"/><rect x="124" y="4"  width="2" height="36"/>
+              <rect x="128" y="14" width="2" height="16"/><rect x="132" y="8"  width="2" height="28"/>
+              <rect x="136" y="18" width="2" height="8"/><rect x="140" y="12" width="2" height="20"/>
+              <rect x="144" y="6"  width="2" height="32"/><rect x="148" y="14" width="2" height="16"/>
+              <rect x="152" y="10" width="2" height="24"/><rect x="156" y="16" width="2" height="12"/>
+              <rect x="160" y="4"  width="2" height="36"/><rect x="164" y="14" width="2" height="16"/>
+              <rect x="168" y="8"  width="2" height="28"/><rect x="172" y="20" width="2" height="4"/>
+              <rect x="176" y="12" width="2" height="20"/><rect x="180" y="6"  width="2" height="32"/>
+              <rect x="184" y="14" width="2" height="16"/><rect x="188" y="10" width="2" height="24"/>
+              <rect x="192" y="16" width="2" height="12"/><rect x="196" y="4"  width="2" height="36"/>
+              <rect x="200" y="14" width="2" height="16"/><rect x="204" y="18" width="2" height="8"/>
+              <rect x="208" y="8"  width="2" height="28"/><rect x="212" y="12" width="2" height="20"/>
+              <rect x="216" y="6"  width="2" height="32"/><rect x="220" y="14" width="2" height="16"/>
+              <rect x="224" y="10" width="2" height="24"/><rect x="228" y="16" width="2" height="12"/>
+              <rect x="232" y="4"  width="2" height="36"/><rect x="236" y="14" width="2" height="16"/>
+            </g>
+          </svg>
+        </div>
+        <div class="play-row">
+          <button class="play-btn">▶</button>
+          <span>00:00 / 00:20</span>
+          <span style="margin-left:auto;">prompt: <span style="color: var(--text);">"对面这把游戏又又又又选了一个镜..."</span></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ZONE 2: A2UI DAG -->
+    <section class="zone">
+      <h3 class="zone-title">Zone 2 · Pipeline Graph (A2UI)</h3>
+      <div class="dag-wrap">
+        <div id="cy"></div>
+        <div class="node-detail" id="nodedetail">
+          <div class="nd-title">Demucs</div>
+          <div class="nd-row"><span>status</span><span class="v" style="color: var(--state-running)">running</span></div>
+          <div class="nd-row"><span>elapsed</span><span class="v">8.2s…</span></div>
+          <div class="nd-row"><span>input</span><span class="v">1 wav · 30.0s</span></div>
+          <div class="nd-row"><span>output</span><span class="v">vocals/inst</span></div>
+          <div class="nd-log">
+htdemucs · cuda<br/>
+loading model: 156 MB<br/>
+processing 30.0s @ 24kHz<br/>
+estimated 7s on GPU...
+          </div>
+        </div>
+      </div>
+      <div class="legend">
+        <span><i class="dot" style="background:var(--state-pending)"></i>pending</span>
+        <span><i class="dot" style="background:var(--state-running)"></i>running</span>
+        <span><i class="dot" style="background:var(--state-done)"></i>done</span>
+        <span><i class="dot" style="background:var(--state-error)"></i>error</span>
+        <span style="margin-left: auto;">click a node for details</span>
+      </div>
+    </section>
+
+    <!-- ZONE 3: SYNTHESIS -->
+    <section class="zone zone-3">
+      <h3 class="zone-title">Zone 3 · Synthesis</h3>
+      <div class="synth-grid">
+        <div class="synth-text">
+          <div class="field">
+            <label>Target text</label>
+            <textarea>It's great to be back in Beijing, truly fantastic. The energy here is incredible.</textarea>
+          </div>
+          <div class="field">
+            <label>Mode</label>
+            <select>
+              <option>zero_shot (use ref voice directly)</option>
+              <option>instruct (compose voice from config)</option>
+            </select>
+          </div>
+        </div>
+        <div class="voice-cfg">
+          <div class="field"><label>Voice config (instruct mode)</label></div>
+          <div class="row">
+            <div class="field"><label>Language</label><select><option>English</option></select></div>
+            <div class="field"><label>Gender</label><select><option>—</option><option>male</option></select></div>
+            <div class="field"><label>Age</label><select><option>—</option></select></div>
+            <div class="field"><label>Quality</label><select><option>broadcast</option></select></div>
+          </div>
+        </div>
+      </div>
+      <div class="btn-row" style="margin-top: 8px;">
+        <button class="btn btn-primary" style="padding: 10px 22px;">▶ Synthesize</button>
+        <button class="btn">Replay last</button>
+        <div style="margin-left: auto; display:flex; gap:10px; align-items:center; font-family: 'Fira Code', monospace; font-size: 11px; color: var(--text-muted);">
+          last: 2.4s · syn_…7a4b · <span style="color: var(--state-done)">✓ eval done</span>
+        </div>
+      </div>
+      <div class="scores">
+        <div class="score-card"><div class="v green">0.972</div><div class="l">SECS</div></div>
+        <div class="score-card"><div class="v">4.12</div><div class="l">MOS NISQA</div></div>
+        <div class="score-card"><div class="v blue">0.14</div><div class="l">CER</div></div>
+        <div class="score-card"><div class="v">68 Hz</div><div class="l">F0 RMSE</div></div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    // A2UI DAG — Cytoscape.js. Static state snapshot illustrating mid-run pipeline.
+    const cy = cytoscape({
+      container: document.getElementById('cy'),
+      style: [
+        {
+          selector: 'node',
+          style: {
+            'background-color': 'data(color)',
+            'label': 'data(label)',
+            'color': '#F8FAFC',
+            'text-valign': 'bottom',
+            'text-margin-y': 6,
+            'font-family': 'Fira Code, monospace',
+            'font-size': '11px',
+            'width': 36, 'height': 36,
+            'border-width': 2,
+            'border-color': '#0F172A',
+          }
+        },
+        {
+          selector: 'node[status = "running"]',
+          style: {
+            'border-color': '#6B8FAF',
+            'border-width': 3,
+          }
+        },
+        {
+          selector: 'edge',
+          style: {
+            'curve-style': 'bezier',
+            'target-arrow-shape': 'triangle',
+            'line-color': '#90A4AE',
+            'target-arrow-color': '#90A4AE',
+            'opacity': 0.6,
+            'width': 2,
+          }
+        }
+      ],
+      layout: {
+        name: 'breadthfirst',
+        directed: true,
+        spacingFactor: 1.2,
+        padding: 20,
+      },
+      elements: [
+        // Source side
+        { data: { id: 'src',    label: 'B 站 URL',  color: '#22C55E', status: 'done' }},
+        { data: { id: 'probe',  label: 'Probe',    color: '#22C55E', status: 'done' }},
+        { data: { id: 'dl',     label: 'Download', color: '#22C55E', status: 'done' }},
+        { data: { id: 'std',    label: '24k WAV',  color: '#22C55E', status: 'done' }},
+        // Parallel preprocessing
+        { data: { id: 'demucs', label: 'Demucs',   color: '#6B8FAF', status: 'running' }},
+        { data: { id: 'enh',    label: 'Enhance',  color: '#475569', status: 'pending' }},
+        { data: { id: 'vad',    label: 'VAD',      color: '#475569', status: 'pending' }},
+        { data: { id: 'spk',    label: 'Speaker',  color: '#475569', status: 'pending' }},
+        // Per-chunk
+        { data: { id: 'asr',    label: 'ASR',      color: '#475569', status: 'pending' }},
+        { data: { id: 'qual',   label: 'Quality',  color: '#475569', status: 'pending' }},
+        { data: { id: 'man',    label: 'manifest', color: '#475569', status: 'pending' }},
+
+        // Edges
+        { data: { source: 'src',    target: 'probe' }},
+        { data: { source: 'probe',  target: 'dl' }},
+        { data: { source: 'dl',     target: 'std' }},
+        { data: { source: 'std',    target: 'demucs' }},
+        { data: { source: 'std',    target: 'enh' }},
+        { data: { source: 'demucs', target: 'vad' }},
+        { data: { source: 'enh',    target: 'vad' }},
+        { data: { source: 'vad',    target: 'spk' }},
+        { data: { source: 'spk',    target: 'asr' }},
+        { data: { source: 'asr',    target: 'qual' }},
+        { data: { source: 'qual',   target: 'man' }},
+      ],
+    });
+
+    // Click-to-inspect (illustrative — would fetch detail from /api/...)
+    cy.on('tap', 'node', (evt) => {
+      const n = evt.target;
+      document.getElementById('nodedetail').querySelector('.nd-title').textContent = n.data('label');
+    });
+
+    // Pulse the running node — minimal A2UI animation cue
+    setInterval(() => {
+      cy.nodes('[status = "running"]').animate(
+        { style: { 'border-width': 6 } },
+        { duration: 600, complete: () => {
+          cy.nodes('[status = "running"]').animate({ style: { 'border-width': 3 }}, { duration: 600 });
+        }}
+      );
+    }, 1400);
+  </script>
+</body>
+</html>

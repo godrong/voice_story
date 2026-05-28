@@ -52,6 +52,8 @@ from .schemas import (
     EvalScores,
     FeedbackEntry,
     HistoryEntry,
+    IngestJob,
+    IngestRequest,
     RefAudio,
     StageState,
     SynthesizeRequest,
@@ -100,6 +102,12 @@ async def lifespan(app: FastAPI):
     # bilibili_jobs：内存里的导入任务进度表；最终落地的 ref 走与上传一致的
     # uploads/upload_<id>.json，重启 server 不会丢已完成的 ref。
     app.state.bilibili_jobs = {}
+    # ingest_jobs: job_id -> IngestJob model. Tracks the M1 dataset pipeline
+    # run (Source/Preprocess/Dataset). The output manifest at
+    # datasets/<name>/manifest.jsonl is the durable artifact.
+    # ingest_jobs：M1 数据管线（Source/Preprocess/Dataset）任务进度表；
+    # 真正的产物是 datasets/<name>/manifest.jsonl，长期持久化。
+    app.state.ingest_jobs = {}
     try:
         yield
     finally:
@@ -218,18 +226,43 @@ async def root():
 
 
 @app.get("/api/refs", response_model=list[RefAudio])
-async def list_refs():
-    """List every built-in reference audio plus any prior uploads.
+async def list_refs(
+    source: str | None = None,
+    search: str | None = None,
+    limit: int = 200,
+):
+    """List reference audios with optional source / substring filter + limit.
 
-    列出所有内置参考音频，以及历史上传过的 ref。
+    列出参考音频，支持按 source 类型 / 子串过滤 + 数量上限。
+
+    Args:
+        source: "builtin" | "upload" | None (both). Default returns uploads first
+                (small set, fast for the UI) then fills with builtins up to limit.
+                None=都返回，但优先放 upload（量小，UI 渲染快），再补 builtin 直到 limit。
+        search: case-insensitive substring match on ref_id, dataset, prompt_text.
+                ref_id / dataset / prompt_text 上的不区分大小写子串匹配。
+        limit: max rows to return. Default 200 (was unbounded — 35k+ blew up the UI).
+               最多返回多少行，默认 200（原来无上限，35k+ 把前端 Vue 渲染撑爆）。
     """
-    refs = list(_iter_builtin_refs())
-    # Also include uploaded refs so a page refresh doesn't lose them.
-    # 也包含历史上传，避免刷新页面就丢。
-    if UPLOADS_DIR.exists():
-        for meta_path in sorted(UPLOADS_DIR.glob("upload_*.json")):
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            refs.append(RefAudio(
+    needle = (search or "").strip().lower() or None
+    want_upload = source in (None, "upload")
+    want_builtin = source in (None, "builtin")
+
+    def _matches(r: RefAudio) -> bool:
+        if needle is None:
+            return True
+        hay = " ".join(filter(None, [r.ref_id, r.dataset or "", r.prompt_text or ""])).lower()
+        return needle in hay
+
+    uploads: list[RefAudio] = []
+    if want_upload and UPLOADS_DIR.exists():
+        for meta_path in sorted(UPLOADS_DIR.glob("upload_*.json"), reverse=True):
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except Exception as e:  # noqa: BLE001 — corrupt sidecar shouldn't 500 the list
+                logger.warning("skipping bad upload sidecar %s: %s", meta_path, e)
+                continue
+            r = RefAudio(
                 ref_id=meta["ref_id"],
                 source="upload",
                 dataset=None,
@@ -237,8 +270,24 @@ async def list_refs():
                 prompt_text=meta["prompt_text"],
                 duration=meta.get("duration"),
                 mos_ovr=None,
-            ))
-    return refs
+            )
+            # Uploads are always returned (no `search` filter applied) so the
+            # Built-in search box doesn't accidentally hide a user's import.
+            # 上传永远全返回，不被 search 过滤；search 仅作用于 builtins，
+            # 避免用户在 Built-in tab 搜索时误隐藏 Uploaded tab 里自己的导入。
+            uploads.append(r)
+
+    # Uploads come first (newest first). Then builtins until we hit limit.
+    # 上传放前（最新优先），再放 builtin 到 limit。
+    out: list[RefAudio] = uploads[:limit]
+    if want_builtin and len(out) < limit:
+        for r in _iter_builtin_refs():
+            if not _matches(r):
+                continue
+            out.append(r)
+            if len(out) >= limit:
+                break
+    return out
 
 
 @app.post("/api/upload-ref", response_model=UploadRefResponse)
@@ -693,6 +742,190 @@ async def bilibili_import_status(job_id: str):
     应当刷新 /api/refs 并自动选中新的 ref_id。
     """
     job = app.state.bilibili_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"unknown job {job_id!r}")
+    return job
+
+
+# ---------------------------------------------------------------------------
+# Dataset ingest: source → manifest pipeline (Source/Preprocess/Dataset).
+# 数据集 ingest：源 → manifest 管线（Source/Preprocess/Dataset）。
+# ---------------------------------------------------------------------------
+
+
+def _new_ingest_job_id() -> str:
+    """Generate an ingest job id like ``ingest_20260518T142301_a3f2``.
+
+    生成 ``ingest_20260518T142301_a3f2`` 形式的 ingest 任务 id。
+    """
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    return f"ingest_{ts}_{uuid.uuid4().hex[:4]}"
+
+
+def _ingest_source_kwargs(req: IngestRequest) -> dict:
+    """Translate the API request into the source-plugin constructor kwargs.
+
+    把 API 请求转成对应 Source 插件的构造参数。
+    """
+    time_range: tuple[float, float] | None = None
+    if req.start_sec is not None and req.end_sec is not None:
+        time_range = (float(req.start_sec), float(req.end_sec))
+    elif (req.start_sec is None) ^ (req.end_sec is None):
+        raise HTTPException(
+            status_code=422,
+            detail="start_sec and end_sec must be provided together.",
+        )
+
+    base = {
+        "name": req.name,
+        "lang_hint": req.lang_hint,
+        "needs_separation": req.needs_separation,
+        "is_single_speaker": req.is_single_speaker,
+    }
+    if req.source == "local":
+        return {**base, "inputs_root": "inputs"}
+    if req.source == "kaggle":
+        if not req.dataset_id:
+            raise HTTPException(422, detail="kaggle source requires dataset_id")
+        return {**base, "dataset_id": req.dataset_id}
+    if req.source in ("bilibili", "youtube"):
+        if not req.url:
+            raise HTTPException(422, detail=f"{req.source} source requires url")
+        return {**base, "url": req.url, "inputs_root": "inputs",
+                "time_range": time_range}
+    raise HTTPException(422, detail=f"unknown source {req.source!r}")
+
+
+async def _ingest_task(app: FastAPI, job_id: str, req: IngestRequest) -> None:
+    """Run the full M1 pipeline stage-by-stage, updating the job's stages list.
+
+    分阶段跑完整 M1 管线，每跑完一段就更新 stages —— 让前端 PipelineCard
+    能看到 SourceAgent / PreprocessAgent / DatasetAgent 的真实进度。
+    """
+    from agents.dataset_agent import DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_MOS_OVR, FilterThresholds
+    from agents.root_agent import build_m1_pipeline
+    from agents.state import PipelineState
+
+    jobs: dict = app.state.ingest_jobs
+    stages = [
+        StageState(name="source", detail="等待开始"),
+        StageState(name="preprocess", detail="等待开始"),
+        StageState(name="dataset", detail="等待开始"),
+    ]
+    jobs[job_id] = jobs[job_id].model_copy(update={
+        "stages": stages, "status": "running",
+    })
+
+    def _commit(**extra):
+        cur = jobs[job_id]
+        update = {"stages": list(stages)}
+        update.update(extra)
+        jobs[job_id] = cur.model_copy(update=update)
+
+    try:
+        source_kwargs = _ingest_source_kwargs(req)
+        thresholds = FilterThresholds(
+            min_mos_ovr=DEFAULT_MIN_MOS_OVR, min_confidence=DEFAULT_MIN_CONFIDENCE,
+        )
+        pipeline_stages = build_m1_pipeline(
+            source_type=req.source,
+            source_kwargs=source_kwargs,
+            speaker_reference=None,
+            speaker_threshold=0.65,
+            thresholds=thresholds,
+            max_files=None,
+            overwrite=False,
+            lang_hint=req.lang_hint,
+            enable_enhance=True,
+            enhance_mode=0,
+        )
+
+        # We run the same `Stage.run(state)` chain that `run_pipeline` would,
+        # but interleave stage bookkeeping. The agents themselves are async.
+        # 自己一段段跑 Stage.run(state)，在每段前后写 stages 状态；
+        # agents 本身是 async，可以直接 await。
+        dataset_root = Path("datasets") / req.name
+        state = PipelineState(dataset_root=dataset_root)
+
+        stage_idx_by_name = {"source_agent": 0, "preprocess_agent": 1, "dataset_agent": 2}
+        for stage_obj in pipeline_stages:
+            i = stage_idx_by_name.get(getattr(stage_obj, "name", ""), None)
+            if i is None:
+                # Defensive: an unknown agent name shouldn't happen, but if a
+                # future agent class shows up, log and skip the visualisation
+                # bookkeeping — still run it.
+                # 防御：将来要是有新 agent 我们没适配，仍然跑它，只是不可视化。
+                logger.warning("ingest: unknown stage name %r, running unsupervised",
+                               getattr(stage_obj, "name", "?"))
+                state = await stage_obj.run(state)
+                continue
+
+            stages[i] = _stage_start(stages[i], detail=f"{stage_obj.name} 运行中...")
+            _commit()
+            state = await stage_obj.run(state)
+
+            # Pull useful per-stage info out of the state to show as detail.
+            # 从 state 里抽点有用信息塞进 detail。
+            if i == 0:
+                detail = f"{len(state.raw_files)} 个标准化 WAV → {state.dataset_root}/raw"
+            elif i == 1:
+                detail = f"{len(state.chunks)} 个 VAD chunk · " \
+                         f"{len(state.vocal_files)} 路 vocals"
+            else:
+                detail = (f"manifest: {state.manifest_path} · "
+                          f"{len(state.transcripts)} 条 ASR")
+            stages[i] = _stage_finish(stages[i], detail=detail)
+            _commit()
+
+        # Final stats from the manifest we just wrote.
+        # 从刚写的 manifest 抽几个汇总指标。
+        from agents.dataset_agent import load_manifest
+        rows = list(load_manifest(state.manifest_path)) if state.manifest_path else []
+        total_dur = sum(r.get("duration", 0.0) for r in rows)
+
+        _commit(
+            status="done",
+            manifest_path=str(state.manifest_path) if state.manifest_path else None,
+            n_chunks=len(rows),
+            total_duration_s=total_dur,
+        )
+        logger.info(
+            "[%s] ingest done: name=%s source=%s chunks=%d duration=%.1fs",
+            job_id, req.name, req.source, len(rows), total_dur,
+        )
+    except Exception as e:  # noqa: BLE001 — surface error to UI, don't crash
+        logger.exception("[%s] ingest failed: %s", job_id, e)
+        for i, s in enumerate(stages):
+            if s.status == "running":
+                stages[i] = _stage_finish(s, ok=False, detail=str(e))
+                break
+        _commit(status="error", error=str(e))
+
+
+@app.post("/api/dataset/ingest", response_model=IngestJob)
+async def dataset_ingest(req: IngestRequest):
+    """Kick off a full M1 pipeline run; returns a job id to poll.
+
+    启动完整 M1 数据管线异步任务；返回 job_id 给前端轮询。
+    产物：datasets/<name>/manifest.jsonl + report.md。
+    """
+    job_id = _new_ingest_job_id()
+    job = IngestJob(
+        job_id=job_id, status="queued", stages=[],
+        name=req.name, source=req.source,
+    )
+    app.state.ingest_jobs[job_id] = job
+    asyncio.create_task(_ingest_task(app, job_id, req))
+    return job
+
+
+@app.get("/api/dataset/ingest/{job_id}", response_model=IngestJob)
+async def dataset_ingest_status(job_id: str):
+    """Return the current state of an M1 ingest job.
+
+    返回某个 M1 ingest 任务的当前状态（含 stages 时间线）。
+    """
+    job = app.state.ingest_jobs.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"unknown job {job_id!r}")
     return job

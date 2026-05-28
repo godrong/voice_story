@@ -126,8 +126,14 @@ def _bilibili(**kw):
     return BilibiliSource(**kw)
 
 
+def _youtube(**kw):
+    from .youtube import YouTubeSource
+    return YouTubeSource(**kw)
+
+
 REGISTRY = {
     "local": _local,
     "kaggle": _kaggle,
     "bilibili": _bilibili,
+    "youtube": _youtube,
 }

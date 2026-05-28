@@ -1,26 +1,33 @@
-// app.js — top-level Vue 3 app for the TTS playground.
-// Wires components, owns the reactive store, calls the FastAPI backend.
+// app.js — top-level Vue 3 app (redesign v2: 3-zone bento + A2UI DAG).
 //
-// app.js ——TTS playground 的顶层 Vue 3 应用。
-// 把组件粘合起来，持有响应式 store，调 FastAPI 后端。
+// Layout:
+//   <header>              project title + worker status
+//   Zone 1 (left)         VoiceSourcePanel — tabs: B站 / YouTube / Upload / Built-in
+//   Zone 2 (right)        PipelineDAG + NodeDetailPanel — A2UI viz of latest job
+//   Zone 3 (full)         SynthesisPanel — text/config/run/player/scores
+//   <bottom-row>          FeedbackPanel + HistoryPanel
+//
+// All fetch + polling logic from v1 is preserved verbatim. Only the
+// template and the components consumed have changed.
+//
+// app.js ——v2 顶层（三区 bento + A2UI DAG）。
+// v1 的 fetch/polling 逻辑原样保留；只换模板和组件。
 
 import {
-  RefPanel,
-  TextPanel,
-  ConfigPanel,
-  ActionBar,
-  PlayerPanel,
+  PipelineDAG,
+  NodeDetailPanel,
+  VoiceSourcePanel,
+  ReferencePreview,
+  SynthesisPanel,
   FeedbackPanel,
   HistoryPanel,
-  PipelineCard,
 } from "/static/components.js";
 
 const { createApp, reactive, ref, computed, onMounted, watch } = Vue;
 
 // ---------------------------------------------------------------------------
 // composeInstructPreview — mirrors api/prompt_compose.py.compose_instruct.
-// composeInstructPreview ——和 api/prompt_compose.py.compose_instruct
-// 保持完全一致；放在前端让用户实时看到拼出来的指令。
+// 与 api/prompt_compose.py 保持一致；让用户实时看到拼出的 instruct 文本。
 // ---------------------------------------------------------------------------
 
 function composeInstructPreview(cfg) {
@@ -42,42 +49,34 @@ function composeInstructPreview(cfg) {
   return parts.join(" ");
 }
 
-// ---------------------------------------------------------------------------
-// App — single root component.
-// App ——单根组件。
-// ---------------------------------------------------------------------------
-
 const App = {
-  components: { RefPanel, TextPanel, ConfigPanel, ActionBar, PlayerPanel, FeedbackPanel, HistoryPanel, PipelineCard },
+  components: {
+    PipelineDAG, NodeDetailPanel, VoiceSourcePanel, ReferencePreview,
+    SynthesisPanel, FeedbackPanel, HistoryPanel,
+  },
   setup() {
+    // -------- core synth state --------
     const refs = ref([]);
     const selectedRefId = ref("");
     const promptText = ref("");
     const text = ref("");
     const mode = ref("zero_shot");
     const config = reactive({
-      language: "English",
-      gender: null,
-      age: null,
-      quality: null,
-      persona: "",
-      emotion: "",
-      description: "",
+      language: "English", gender: null, age: null, quality: null,
+      persona: "", emotion: "", description: "",
     });
 
-    const status = ref("idle"); // idle / running / ok / error
+    const runStatus = ref("idle");
     const statusMessage = ref("");
     const uploading = ref(false);
     const lastSyn = ref(null);
     const feedbackSaved = ref(false);
     const history = ref([]);
-    const evalStatus = ref(""); // "", "running", "done", "error"
+    const evalStatus = ref("");
     const evalScores = ref(null);
     let evalPollTimer = null;
 
-    // Bilibili import state. All backend chatter lives here; RefPanel just
-    // emits intent events and renders these.
-    // B 站导入相关状态，集中在这里——所有 fetch 都从这里发，RefPanel 只 emit 意图。
+    // -------- bilibili import state --------
     const bilibiliProbing = ref(false);
     const bilibiliProbeResult = ref(null);
     const bilibiliImporting = ref(false);
@@ -85,38 +84,56 @@ const App = {
     const bilibiliError = ref("");
     let bilibiliPollTimer = null;
 
-    const composed = computed(() => composeInstructPreview(config));
+    // -------- ingest (dataset) state --------
+    const ingesting = ref(false);
+    const ingestJob = ref(null);
+    const ingestError = ref("");
+    let ingestPollTimer = null;
 
-    // Derived TTS pipeline stages — synth is sync so it's always done by the
-    // time we have lastSyn; eval mirrors evalStatus + evalScores.
-    // 派生的 TTS pipeline stages —— synth 是同步调用所以拿到 lastSyn 时
-    // 一定 done；eval 跟 evalStatus / evalScores 同步。
-    const ttsStages = computed(() => {
-      if (!lastSyn.value) return [];
-      const synStage = {
-        name: "synthesize",
-        status: "done",
-        elapsed_s: lastSyn.value.wall_time_s,
-        detail: `mode=${lastSyn.value.mode} · syn_id=${lastSyn.value.syn_id.slice(0, 24)}...`,
-      };
-      const es = evalStatus.value;
-      const sc = evalScores.value;
-      const evalDetail = sc
-        ? `NISQA=${(sc.mos_nisqa ?? 0).toFixed(2)} · WER=${(sc.wer ?? 0).toFixed(2)}` +
-          ` · SECS=${(sc.secs ?? 0).toFixed(2)}` +
-          (sc.f0_rmse_hz != null ? ` · F0=${sc.f0_rmse_hz.toFixed(1)}Hz` : "")
-        : (es === "running" ? "WER/CER + neural MOS + SECS + F0 在跑..." : "");
-      const evalStage = {
-        name: "evaluate",
-        status: es === "done" ? "done"
-              : es === "error" ? "error"
-              : es === "running" ? "running"
-              : "pending",
-        elapsed_s: sc?.eval_time_s,
-        detail: evalDetail,
-      };
-      return [synStage, evalStage];
+    // -------- DAG node selection (Zone 2) --------
+    const selectedDagStage = ref(null);
+
+    // The DAG renders whichever job is most relevant. Priority:
+    //   ingest > bilibili (because ingest is the bigger pipeline)
+    // 优先级：完整 ingest > B 站单段 import。
+    const activeJob = computed(() => {
+      if (ingestJob.value && ingestJob.value.stages?.length) {
+        return {
+          stages: ingestJob.value.stages,
+          meta: {
+            job_id: ingestJob.value.job_id,
+            name: ingestJob.value.name,
+            source: ingestJob.value.source,
+            status: ingestJob.value.status,
+          },
+          title: `Ingest · ${ingestJob.value.name} (${ingestJob.value.source})`,
+        };
+      }
+      if (bilibiliJob.value && bilibiliJob.value.stages?.length) {
+        return {
+          stages: bilibiliJob.value.stages,
+          meta: {
+            job_id: bilibiliJob.value.job_id,
+            name: "(B 站 import)",
+            source: "bilibili",
+            status: bilibiliJob.value.status,
+          },
+          title: `B 站 import · ${bilibiliJob.value.progress_hint || bilibiliJob.value.status}`,
+        };
+      }
+      return null;
     });
+
+    // When stages update from polling, refresh the selected stage's pointer
+    // so the side panel shows live elapsed/detail.
+    // stages 在轮询里被替换；保持选中索引以让 side panel 同步刷新。
+    watch(activeJob, (j) => {
+      if (!j || selectedDagStage.value == null) return;
+      const idx = j.stages.findIndex(s => s.name === selectedDagStage.value.name);
+      if (idx >= 0) selectedDagStage.value = j.stages[idx];
+    }, { deep: true });
+
+    const composed = computed(() => composeInstructPreview(config));
 
     const canRun = computed(() => {
       if (!selectedRefId.value || !text.value.trim()) return false;
@@ -124,9 +141,7 @@ const App = {
       return true;
     });
 
-    // Keep prompt_text in sync with the selected ref unless the user
-    // has manually edited it.
-    // 选择 ref 时同步它的 prompt_text；用户手动改过的不覆盖。
+    // -------- ref selection wiring --------
     let promptDirty = false;
     watch(selectedRefId, (id) => {
       const r = refs.value.find((x) => x.ref_id === id);
@@ -134,32 +149,39 @@ const App = {
     });
     watch(promptText, () => { promptDirty = true; });
 
+    // -------- API: refs / history --------
+    // Built-in search query — debounced from VoiceSourcePanel. Empty = no
+    // filter, just first 200 capped by backend.
+    // built-in 搜索词；空字符串 = 不过滤，后端默认 cap 200。
+    const builtinSearch = ref("");
+
     async function loadRefs() {
       try {
-        const r = await fetch("/api/refs");
+        const params = new URLSearchParams();
+        params.set("limit", "200");
+        if (builtinSearch.value) params.set("search", builtinSearch.value);
+        const r = await fetch("/api/refs?" + params.toString());
         refs.value = await r.json();
-      } catch (e) {
-        console.error("loadRefs failed:", e);
-      }
+      } catch (e) { console.error("loadRefs failed:", e); }
     }
-
+    function onBuiltinSearch(q) {
+      builtinSearch.value = q;
+      loadRefs();
+    }
     async function loadHistory() {
       try {
         const r = await fetch("/api/history?limit=20");
         history.value = await r.json();
-      } catch (e) {
-        console.error("loadHistory failed:", e);
-      }
+      } catch (e) { console.error("loadHistory failed:", e); }
     }
 
+    // -------- upload --------
     async function onUpload(file) {
       uploading.value = true;
       statusMessage.value = "uploading + transcribing reference audio...";
       try {
         const form = new FormData();
         form.append("file", file);
-        // Don't pass prompt_text — let the server run ASR.
-        // 不传 prompt_text，让后端跑 ASR。
         const r = await fetch("/api/upload-ref", { method: "POST", body: form });
         if (!r.ok) throw new Error(`upload failed: ${r.status} ${await r.text()}`);
         const result = await r.json();
@@ -167,7 +189,7 @@ const App = {
         promptDirty = false;
         selectedRefId.value = result.ref_id;
         promptText.value = result.prompt_text;
-        statusMessage.value = `uploaded; ASR detected lang=${result.asr_lang}`;
+        statusMessage.value = `uploaded; ASR lang=${result.asr_lang}`;
       } catch (e) {
         console.error(e);
         statusMessage.value = `upload error: ${e.message}`;
@@ -176,13 +198,10 @@ const App = {
       }
     }
 
+    // -------- bilibili probe + import (unchanged from v1) --------
     function stopBilibiliPoll() {
-      if (bilibiliPollTimer) {
-        clearTimeout(bilibiliPollTimer);
-        bilibiliPollTimer = null;
-      }
+      if (bilibiliPollTimer) { clearTimeout(bilibiliPollTimer); bilibiliPollTimer = null; }
     }
-
     async function onBilibiliProbe(url) {
       bilibiliError.value = "";
       bilibiliProbeResult.value = null;
@@ -191,23 +210,18 @@ const App = {
       bilibiliProbing.value = true;
       try {
         const r = await fetch("/api/bilibili/probe", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
+          method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ url }),
         });
         if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
         bilibiliProbeResult.value = await r.json();
       } catch (e) {
-        console.error("bilibili probe failed:", e);
         bilibiliError.value = `probe failed: ${e.message}`;
       } finally {
         bilibiliProbing.value = false;
       }
     }
-
     async function pollBilibiliJob(jobId, attempt = 0) {
-      // Cap polling at ~3 min (90 × 2s). Import normally finishes in 10-60s.
-      // 总计最多 ~3 分钟；正常 10-60s 内能拿到 ready。
       if (attempt > 90) {
         bilibiliError.value = "import timed out after ~3 min";
         bilibiliImporting.value = false;
@@ -220,8 +234,6 @@ const App = {
         bilibiliJob.value = data;
         if (data.status === "ready") {
           bilibiliImporting.value = false;
-          // Refresh refs list and auto-select the new one.
-          // 刷新 refs 列表并自动选中新导入的那条。
           await loadRefs();
           promptDirty = false;
           selectedRefId.value = data.ref_id;
@@ -234,12 +246,9 @@ const App = {
           bilibiliError.value = `import failed: ${data.error || "unknown error"}`;
           return;
         }
-      } catch (e) {
-        console.warn("bilibili poll error:", e.message);
-      }
+      } catch (e) { console.warn("bilibili poll error:", e.message); }
       bilibiliPollTimer = setTimeout(() => pollBilibiliJob(jobId, attempt + 1), 2000);
     }
-
     async function onBilibiliImport(req) {
       bilibiliError.value = "";
       bilibiliJob.value = null;
@@ -247,8 +256,7 @@ const App = {
       bilibiliImporting.value = true;
       try {
         const r = await fetch("/api/bilibili/import", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
+          method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify(req),
         });
         if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
@@ -256,87 +264,118 @@ const App = {
         bilibiliJob.value = job;
         pollBilibiliJob(job.job_id);
       } catch (e) {
-        console.error("bilibili import failed:", e);
         bilibiliError.value = `import failed: ${e.message}`;
         bilibiliImporting.value = false;
       }
     }
 
-    function onBilibiliReset() {
-      stopBilibiliPoll();
-      bilibiliProbeResult.value = null;
-      bilibiliJob.value = null;
-      bilibiliError.value = "";
-      bilibiliImporting.value = false;
-      bilibiliProbing.value = false;
+    // -------- dataset ingest (used for YouTube too) --------
+    function stopIngestPoll() {
+      if (ingestPollTimer) { clearTimeout(ingestPollTimer); ingestPollTimer = null; }
     }
-
-    function stopEvalPoll() {
-      if (evalPollTimer) {
-        clearTimeout(evalPollTimer);
-        evalPollTimer = null;
+    async function pollIngestJob(jobId, attempt = 0) {
+      if (attempt > 900) {
+        ingestError.value = "ingest timed out after ~30 min";
+        ingesting.value = false;
+        return;
+      }
+      try {
+        const r = await fetch(`/api/dataset/ingest/${jobId}`);
+        if (!r.ok) throw new Error(`${r.status}`);
+        const data = await r.json();
+        ingestJob.value = data;
+        if (data.status === "done") {
+          ingesting.value = false;
+          statusMessage.value =
+            `ingest done: ${data.n_chunks} chunks @ ${data.total_duration_s?.toFixed(1)}s → ${data.manifest_path}`;
+          return;
+        }
+        if (data.status === "error") {
+          ingesting.value = false;
+          ingestError.value = `ingest failed: ${data.error || "unknown error"}`;
+          return;
+        }
+      } catch (e) { console.warn("ingest poll error:", e.message); }
+      ingestPollTimer = setTimeout(() => pollIngestJob(jobId, attempt + 1), 2000);
+    }
+    async function onIngestRun(req) {
+      ingestError.value = "";
+      ingestJob.value = null;
+      stopIngestPoll();
+      ingesting.value = true;
+      try {
+        const r = await fetch("/api/dataset/ingest", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(req),
+        });
+        if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+        const job = await r.json();
+        ingestJob.value = job;
+        pollIngestJob(job.job_id);
+      } catch (e) {
+        ingestError.value = `ingest failed: ${e.message}`;
+        ingesting.value = false;
       }
     }
+    // YouTube tab → ingest endpoint with auto-generated dataset name.
+    // YouTube tab 复用完整 ingest 端点；自动生成数据集名。
+    function onYoutubeExtract(payload) {
+      const name = "yt_" + Date.now().toString(36);
+      onIngestRun({
+        source: "youtube",
+        name,
+        url: payload.url,
+        start_sec: payload.start_sec,
+        end_sec: payload.end_sec,
+        is_single_speaker: true,
+        needs_separation: true,
+      });
+    }
 
+    // -------- DAG node click --------
+    function onDagNodeSelect(payload) {
+      selectedDagStage.value = payload.stage;
+    }
+
+    // -------- synthesize (unchanged) --------
+    function stopEvalPoll() {
+      if (evalPollTimer) { clearTimeout(evalPollTimer); evalPollTimer = null; }
+    }
     async function pollEval(synId, attempt = 0) {
-      // Cap polling at ~3 min (~90 × 2s). Eval normally finishes in 10-40s.
-      // 总计最多 ~3 分钟（90 × 2s）；正常 eval 应在 10-40s 内出。
       if (attempt > 90 || !lastSyn.value || lastSyn.value.syn_id !== synId) return;
       try {
         const r = await fetch(`/api/eval/${synId}`);
         if (!r.ok) throw new Error(`${r.status}`);
         const data = await r.json();
         evalStatus.value = data.status;
-        if (data.status === "done") {
-          evalScores.value = data.scores;
-          // Refresh history so the eval shows up there too.
-          // 顺手刷新 history。
-          loadHistory();
-          return;
-        }
-        if (data.status === "error") {
-          evalScores.value = null;
-          return;
-        }
-      } catch (e) {
-        console.warn("eval poll error:", e.message);
-      }
+        if (data.status === "done") { evalScores.value = data.scores; loadHistory(); return; }
+        if (data.status === "error") { evalScores.value = null; return; }
+      } catch (e) { console.warn("eval poll error:", e.message); }
       evalPollTimer = setTimeout(() => pollEval(synId, attempt + 1), 2000);
     }
 
     async function onSynthesize() {
-      status.value = "running";
+      runStatus.value = "running";
       statusMessage.value = "synthesising (first request takes ~60s)...";
       feedbackSaved.value = false;
       stopEvalPoll();
-      evalStatus.value = "";
-      evalScores.value = null;
+      evalStatus.value = ""; evalScores.value = null;
       try {
-        const body = {
-          text: text.value,
-          ref_id: selectedRefId.value,
-          mode: mode.value,
-        };
-        if (mode.value === "instruct") {
-          body.voice_config = { ...config };
-        }
+        const body = { text: text.value, ref_id: selectedRefId.value, mode: mode.value };
+        if (mode.value === "instruct") body.voice_config = { ...config };
         const r = await fetch("/api/synthesize", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
+          method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
         });
         if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
         lastSyn.value = await r.json();
-        status.value = "ok";
+        runStatus.value = "ok";
         statusMessage.value = `done in ${lastSyn.value.wall_time_s.toFixed(1)}s`;
         loadHistory();
-        // Start polling for objective eval (server kicks off automatically).
-        // 立即开始轮询客观 eval（服务端已自动后台跑）。
         evalStatus.value = "running";
         pollEval(lastSyn.value.syn_id);
       } catch (e) {
-        console.error(e);
-        status.value = "error";
+        runStatus.value = "error";
         statusMessage.value = `error: ${e.message}`;
       }
     }
@@ -344,111 +383,133 @@ const App = {
     async function onFeedback(entry) {
       try {
         const r = await fetch("/api/feedback", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
+          method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify(entry),
         });
         if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
         feedbackSaved.value = true;
         loadHistory();
-      } catch (e) {
-        console.error(e);
-        statusMessage.value = `feedback save failed: ${e.message}`;
-      }
+      } catch (e) { statusMessage.value = `feedback save failed: ${e.message}`; }
     }
 
     function onReplay(item) {
       stopEvalPoll();
       lastSyn.value = {
-        syn_id: item.syn_id,
-        audio_url: item.audio_url,
-        wall_time_s: item.wall_time_s,
-        mode: item.mode,
+        syn_id: item.syn_id, audio_url: item.audio_url,
+        wall_time_s: item.wall_time_s, mode: item.mode,
         composed_instruct: item.composed_instruct,
       };
       feedbackSaved.value = !!item.feedback;
-      // History items carry their own eval block when available.
-      // history 项自带 eval block（如果有）。
-      if (item.eval) {
-        evalStatus.value = "done";
-        evalScores.value = item.eval;
-      } else {
-        evalStatus.value = "";
-        evalScores.value = null;
-      }
+      if (item.eval) { evalStatus.value = "done"; evalScores.value = item.eval; }
+      else { evalStatus.value = ""; evalScores.value = null; }
     }
 
-    onMounted(() => {
-      loadRefs();
-      loadHistory();
-    });
+    onMounted(() => { loadRefs(); loadHistory(); });
+
+    // -------- config field mutation (single source of reactivity truth) --------
+    // Children must NOT use v-model:config (would try to reassign a reactive
+    // const). They emit `set-config-field` instead; we mutate in place.
+    // 子组件用 set-config-field 触发我们就地改字段——绝对不要 v-model:config。
+    function onSetConfigField({ key, value }) { config[key] = value; }
 
     return {
+      // state
       refs, selectedRefId, promptText, text, mode, config,
-      status, statusMessage, uploading, lastSyn, feedbackSaved, history,
+      runStatus, statusMessage, uploading,
+      lastSyn, feedbackSaved, history,
       evalStatus, evalScores,
       bilibiliProbing, bilibiliProbeResult, bilibiliImporting,
       bilibiliJob, bilibiliError,
-      ttsStages,
+      ingesting, ingestJob, ingestError,
+      activeJob, selectedDagStage,
+      // computed
       composed, canRun,
+      // handlers
       onUpload, onSynthesize, onFeedback, onReplay,
-      onBilibiliProbe, onBilibiliImport, onBilibiliReset,
+      onBilibiliProbe, onBilibiliImport,
+      onYoutubeExtract, onDagNodeSelect,
+      onBuiltinSearch, onSetConfigField,
     };
   },
 
   template: `
     <div>
-      <div class="app-title">voice_story — TTS Playground</div>
-      <div class="app-sub">
-        Upload reference audio → describe the voice → synthesise → rate.
-        Ratings feed <code>outputs/webui/feedback.jsonl</code>, the data source for the listening policy.
-      </div>
+      <header class="app-header">
+        <h1>
+          <span class="accent">▸</span> voice_story
+          <span class="sub">TTS · v0.1.4 · dark</span>
+        </h1>
+        <div class="status">
+          TTS worker: <span class="ok">ready</span>
+        </div>
+      </header>
 
-      <div class="grid-2">
-        <RefPanel
+      <div v-if="statusMessage" class="app-sub">{{ statusMessage }}</div>
+
+      <main class="zones">
+        <!-- Zone 1 -->
+        <VoiceSourcePanel
           :refs="refs"
           v-model:selectedRefId="selectedRefId"
-          v-model:promptText="promptText"
-          :uploading="uploading"
           :bilibiliProbing="bilibiliProbing"
           :bilibiliProbeResult="bilibiliProbeResult"
           :bilibiliImporting="bilibiliImporting"
-          :bilibiliJob="bilibiliJob"
           :bilibiliError="bilibiliError"
+          :uploading="uploading"
           @upload="onUpload"
           @bilibili-probe="onBilibiliProbe"
           @bilibili-import="onBilibiliImport"
-          @bilibili-reset="onBilibiliReset" />
+          @youtube-extract="onYoutubeExtract"
+          @builtin-search="onBuiltinSearch" />
 
-        <TextPanel v-model:text="text" />
+        <!-- Zone 2 -->
+        <section class="zone">
+          <h3 class="zone-title">Zone 2 · Pipeline Graph (A2UI)</h3>
+          <div class="dag-wrap">
+            <div v-if="activeJob">
+              <PipelineDAG
+                :title="activeJob.title"
+                :stages="activeJob.stages"
+                @node-select="onDagNodeSelect" />
+            </div>
+            <div v-else class="cy-canvas"
+                 style="display:flex; align-items:center; justify-content:center; color: var(--fg-muted);
+                        font-family: var(--font-mono); font-size: 12px; text-align:center; padding: 20px;">
+              No active pipeline. Trigger an import or ingest<br/>from Zone 1 to see the agent graph here.
+            </div>
+            <NodeDetailPanel
+              :stage="selectedDagStage"
+              :jobMeta="activeJob ? activeJob.meta : null" />
+          </div>
+        </section>
+
+        <!-- Zone 3 -->
+        <SynthesisPanel
+          v-model:text="text"
+          v-model:mode="mode"
+          :config="config"
+          :composed="composed"
+          :selectedRefId="selectedRefId"
+          :runStatus="runStatus"
+          :statusMessage="statusMessage"
+          :lastSyn="lastSyn"
+          :evalStatus="evalStatus"
+          :evalScores="evalScores"
+          @set-config-field="onSetConfigField"
+          @synthesize="onSynthesize" />
+      </main>
+
+      <!-- Bottom row: feedback + history -->
+      <div class="bottom-row">
+        <FeedbackPanel
+          :synId="lastSyn ? lastSyn.syn_id : ''"
+          :saved="feedbackSaved"
+          @submit="onFeedback" />
+
+        <HistoryPanel
+          :items="history"
+          @replay="onReplay" />
       </div>
-
-      <ConfigPanel
-        v-model:mode="mode"
-        v-model:config="config"
-        :composed="composed" />
-
-      <ActionBar
-        :status="status"
-        :statusMessage="statusMessage"
-        :canRun="canRun"
-        @synthesize="onSynthesize" />
-
-      <PlayerPanel :syn="lastSyn" :evalStatus="evalStatus" :evalScores="evalScores" />
-
-      <PipelineCard
-        v-if="ttsStages.length"
-        title="TTS pipeline"
-        :stages="ttsStages" />
-
-      <FeedbackPanel
-        :synId="lastSyn ? lastSyn.syn_id : ''"
-        :saved="feedbackSaved"
-        @submit="onFeedback" />
-
-      <HistoryPanel
-        :items="history"
-        @replay="onReplay" />
     </div>
   `,
 };

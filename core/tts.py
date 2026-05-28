@@ -33,6 +33,7 @@ import select
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Protocol
 
@@ -208,28 +209,54 @@ class LocalSubprocessTTS:
             logger.warning("unexpected pre-handshake event: %s", event)
 
     def _read_one_event(self, *, timeout: float) -> dict:
-        """Read one JSON line from worker stdout with a select() timeout.
+        """Read one JSON line from worker stdout; skip non-JSON noise lines.
 
-        从 worker stdout 读一行 JSON；用 select 实现超时，避免无限阻塞。
+        CosyVoice (and friends like its audio-clipping check) sometimes prints
+        debug info straight to stdout, e.g. ``max value is tensor(1.0044)``.
+        Those lines would crash a strict json.loads. We loop instead, logging
+        and ignoring non-JSON output until either a valid JSON line arrives or
+        ``timeout`` elapses overall.
+
+        从 worker stdout 读一行 JSON；非 JSON 噪声行警告并跳过。
+        CosyVoice 及其依赖（比如音频削波检查）偶尔会直接 print 调试信息到
+        stdout，例如 ``max value is tensor(1.0044)``。严格 json.loads 会炸；
+        改成循环读，把非 JSON 行警告记录后跳过，直到收到有效 JSON 或
+        ``timeout`` 总时限到达。
         """
-        # Note: select() on a Python text-mode pipe works on POSIX because
-        # the underlying fd is the same; on Windows we'd need a different
-        # approach (we don't target Windows in this project).
-        # 注：text-mode pipe 上 select 在 POSIX 有效（底层 fd 不变）。
-        # Windows 需要别的方案，本项目不支持 Windows。
-        r, _, _ = select.select([self._proc.stdout], [], [], timeout)
-        if not r:
-            self._kill()
-            raise TimeoutError(
-                f"worker did not respond within {timeout}s (likely hanging or slow load)"
-            )
-        line = self._proc.stdout.readline()
-        if not line:
-            raise TTSWorkerCrashed("worker closed stdout (likely crashed during startup)")
-        try:
-            return json.loads(line)
-        except json.JSONDecodeError as e:
-            raise TTSError(f"non-JSON response from worker: {line!r} ({e})") from e
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._kill()
+                raise TimeoutError(
+                    f"worker did not respond within {timeout}s "
+                    f"(likely hanging or slow load)"
+                )
+            r, _, _ = select.select([self._proc.stdout], [], [], remaining)
+            if not r:
+                self._kill()
+                raise TimeoutError(
+                    f"worker did not respond within {timeout}s "
+                    f"(likely hanging or slow load)"
+                )
+            line = self._proc.stdout.readline()
+            if not line:
+                raise TTSWorkerCrashed(
+                    "worker closed stdout (likely crashed during startup)"
+                )
+            stripped = line.strip()
+            if not stripped:
+                continue  # blank line, ignore
+            try:
+                return json.loads(stripped)
+            except json.JSONDecodeError:
+                # Library debug print leaked into the IPC channel — skip with
+                # a warning, don't fail the synth request.
+                # 库往 IPC 管道塞了调试 print，警告并跳过，不让 synth 失败。
+                logger.warning(
+                    "TTS worker stdout (non-JSON, ignored): %s", stripped[:200]
+                )
+                continue
 
     def synthesize(
         self, text: str, ref_audio: Path, *,
