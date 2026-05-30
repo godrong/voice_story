@@ -1,469 +1,86 @@
-# Research Plan — Style Control without Speaker Fidelity Loss
+# Research Plan — CV3 Zero-Shot Emotional TTS Baseline
 
-> 本文档与 [PLAN.md](PLAN.md)（架构）、[ROADMAP.md](ROADMAP.md)（里程碑）形成三角：
-> - **PLAN.md** 回答"系统由什么组成"
-> - **ROADMAP.md** 回答"什么时候做哪一块"
-> - **本文档** 回答"我们到底在解决什么科学/工程问题，怎么验证解决了"
->
-> _Last updated: 2026-05-18_
+> _Last updated: 2026-05-30 · exp_005 完成，prompt 格式修正_
 
 ---
 
 ## 0. TL;DR
 
-在 [exp_002](../experiments/exp_002_ref_and_instruct/eval_objective.md) 中通过 4 维客观评测发现：CosyVoice 2 的 instruct mode 在保持自然度（MOS、WER 几乎不变）的同时，**牺牲了说话人音色保真（SECS -0.13）和韵律拟合（F0 RMSE +21 Hz）**。这暴露了一个具体的架构问题——**风格条件信号与说话人条件信号在模型内部互相干扰**。
+exp_005 用正确 prompt 格式建立 CV3 零样本情感合成基线（8 spk × 5 emo × 6 text × 3 seed = 720 合成）：
 
-本研究计划聚焦三个可量化目标：
+| 情感 | CER | SECS | F0 RMSE |
+|------|-----|------|---------|
+| Neutral | 0.007 | 0.970 | 46.0 Hz |
+| Happy | 0.007 | 0.965 | 68.1 Hz |
+| Angry | 0.009 | 0.959 | 72.5 Hz |
+| Surprise | 0.008 | 0.965 | 83.9 Hz |
+| Sad | 0.009 | 0.976 | 57.7 Hz |
 
-1. **instruct ΔSS** — 解决官方承认的"cannot control timbre through textual instructions"
-2. **中文 WER 修复** — 修复 v3 官方 benchmark 里的中文可懂度退化 (12.58→14.15)
-3. **Semantic Leakage** — **2026-05-28 新发现**：CosyVoice 3 zero-shot 在特定情绪 ref 上存在 semantic leakage（ref 文本内容污染合成输出），非 LoRA 引入，属基座模型 conditioning 缺陷
-
-通过**多说话人 style LoRA** 在 ESD (20 spk × 5 emotion) + AISHELL-3 (218 spk) 上训练，用中英混合 + style-balanced batch 同时处理三个目标。所有改进用独立 eval framework (NISQA/SECS/WER/F0/SLR) 量化。
-
----
-
-## 1. 问题发现 (Discovery)
-
-### 1.1 起点：主观听感
-
-2026-05-15 用户对 [exp_002 outputs/](../experiments/exp_002_ref_and_instruct/outputs/) 6 条 t3_wangrong wav 做了一次主观试听，判断：
-
-- `r1_emphatic_businessman__none` (zero_shot) 自然
-- `r1_emphatic_businessman__en_rising` (instruct) 劣化
-- `r1_emphatic_businessman__en_emphatic` (instruct) 劣化
-- `r1_emphatic_businessman__zh_rising` (instruct) 劣化
-
-**但这是 1 评委 × 4 样本 × 无量表的 informal listening**——不可复现、不可量化、不可写报告。
-
-### 1.2 工程响应：搭客观 eval 框架
-
-为把主观判断变成可累积、可质疑的数据，新建：
-
-- [core/eval_tts.py](../core/eval_tts.py) — 四维客观指标模块：
-  - **MOS-NISQA**（主自然度，NISQA_DIM 神经预测）
-  - **WER / CER**（可懂度，复用 [core/asr.py](../core/asr.py) ASR cycle）
-  - **SECS**（说话人保真，`microsoft/wavlm-base-plus-sv` 余弦）
-  - **F0 RMSE**（韵律拟合，librosa.pyin voiced overlap）
-- [scripts/eval_exp002.py](../scripts/eval_exp002.py) — 批量评测脚本
-- [api/server.py](../api/server.py) 的 `/api/eval/{syn_id}` 异步 hook + WebUI eval 卡片
-
-### 1.3 关键发现 — exp_002 完整数据
-
-完整数据见 [exp_002 eval_objective.md](../experiments/exp_002_ref_and_instruct/eval_objective.md)。t3_wangrong 组（与主观判断对应）：
-
-| Metric | zero_shot 均值 | instruct 均值 | Δ |
-|---|---|---|---|
-| MOS-NISQA | 4.503 | 4.582 | +0.079 (flat) |
-| MOS-P808 | 4.113 | 4.155 | +0.042 (flat) |
-| WER | 0.092 | 0.079 | -0.013 (flat) |
-| **SECS** | **0.971** | **0.840** | **-0.131** ⚠️ |
-| **F0 RMSE (Hz)** | **38.819** | **59.916** | **+21.097** ⚠️ |
-
-**跨三个独立 target text（t1/t2/t3）一致**——pattern 真实，非随机噪声。
-
-### 1.4 Finding 翻译
-
-主观说"instruct 听起来不像 Trump 了"——客观数据揭示这不是自然度问题：
-
-| 主观感受 | 对应客观轴 | 数字 |
-|---|---|---|
-| "听起来不自然" | MOS | ❌ 无明显变化 |
-| "念错了" | WER | ❌ 无明显变化 |
-| **"不像 Trump 了"** | **SECS** | ✓ -0.13 |
-| **"语调不对了"** | **F0 RMSE** | ✓ +21 Hz |
-
-### 1.5 新发现：Semantic Leakage + 根因定位实验（2026-05-28）
-
-在 [exp_003 多情感评测](experiments/exp_003_cosyvoice3/outputs/report.html) 中发现了一个**独立于 LoRA 的基座模型缺陷**。
-
-#### 1.5.1 现象
-
-CosyVoice 3 zero-shot 在特定情绪 ref 上，ref 音频的原始文本内容会**污染合成输出**。
-
-```
-ref 原文: "她和维克分手了，所以她申请转调。"
-target:   "春天来了，桃花开了..."
-
-合成 ASR: "所以 他 申 请 转 调 春天 来 了 桃 花 开 了..."
-          ^^^^^^^^^^^^^^^^   ref 文本泄露
-```
-
-#### 1.5.2 泄漏源定位实验（Approach B 证伪 + C probe）
-
-**实验设计**：在同一个 Sad ref 上跑三组对照——正常 / speech token 置零 / speech token + speaker embedding 都置零。
-
-| 条件 | zh_poem SLR | zh_news SLR | zh_prose SLR | 解读 |
-|---|---|---|---|---|
-| normal (完整条件) | 0.000 | 0.152 | 0.222 | 基准——部分泄漏 |
-| **zero_st** (speech token→0) | 0.000 | 0.241 | **0.071** | 不一致——有时改善有时恶化 |
-| **zero_st+spk_emb** (全零) | **0.289** | 0.241 | **0.406** | **最差——泄漏加剧** |
-
-**三个结论**：
-
-1. **方案 B（Content-Masked Speech Tokens）被证伪**
-   - Mask 掉 86% speech token 后 SLR **上升**（0.04→0.18），而非下降
-   - 原因：mask 掉韵律信息后模型退化到 speaker embedding，embedding 携带更强的语义偏差
-   - 结论：**speech token 不是唯一的泄漏源，甚至不是主要泄漏源**
-
-2. **Speaker embedding 是更强的泄漏源**
-   - zero_st+spk_emb 的 SLR 最高（0.29-0.40）
-   - CAM++ 从 5s Sad 音频提取的 192-dim 向量编码了太多语义信息
-   - 当 speaker embedding 也被置零时，模型无法区分"谁在说话"和"说了什么"
-
-3. **模型不需要 speech token 就能生成可懂语音**
-   - zero_st 下的输出仍然是可懂中文（"乃标兵奔北坡..."）
-   - 证明 prosody-only conditioning 在架构上是可行的
-
-#### 1.5.3 修正后的根因
-
-CosyVoice 3 的 conditioning 机制有**两个泄漏源**：
-
-```
-CAM++ embedding (192-dim) ──→ 携带了 speaker identity + 部分语义
-Speech tokens (139 tokens) ──→ 携带了 prosody + 剩余语义
-                    ↑
-              两者互有重叠，模型分不开
-```
-
-**与目标 #1 的关系**：三个目标指向同一个深层问题——**CosyVoice 的 conditioning 机制缺乏 speaker/style/content 三者的显式解耦**。
+**核心发现**：
+- 内容保真度在所有情感下接近完美（CER ~0）
+- **高唤醒情感（Surprise/Angry/Happy）F0 RMSE 是低唤醒（Neutral/Sad）的 1.5-1.8 倍**
+- CV3 零样本在正确调用下表现良好，不需要训练/微调
+- 之前 exp_002-004 报告的"语义泄漏"是 prompt 格式错误，已修正
 
 ---
 
-## 2. 问题定义 (Definition)
+## 1. 已完成工作
 
-### 2.1 核心问题陈述
+### 1.1 评测框架
 
-> **给定一个能做高质量零样本克隆的 TTS 模型（CosyVoice 2 zero_shot SECS=0.971），如何在添加风格控制信号（emotion / pace / prosody）的同时，不损害已有的 speaker fidelity？**
+- 4 维客观指标：CER (FunASR) / SECS (WavLM-SV) / F0 RMSE (librosa.pyin) / MOS (NISQA)
+- 发现 DNSMOS-P808 对 TTS 输出给出反向排序，替换为 NISQA
 
-### 2.2 这不是 prompt 工程问题
+### 1.2 Instruct Mode 缺陷验证 (exp_002)
 
-- 测了 4 种 prompt 配置（`en_rising` / `en_emphatic` / `zh_rising` / 不发指令）
-- 凡是 instruct 模式都引发同一种 SECS + F0 退化
-- 改 prompt **文本本身**无法逃出这个 trade-off
+- 确认官方承认的"instruct mode 无法通过文本控制音色"
+- SECS -0.13, F0 RMSE +21 Hz
 
-→ 这是 **模型 conditioning 机制的架构缺陷**，需要训练侧介入。
+### 1.3 LoRA Style Adaptation (exp_003)
 
-### 2.3 两条产品线（参见 [memory](../.claude/...)）
+- LoRA rank=8 在 ESD 上训练，F0 RMSE 降低 23 Hz，SECS 不变
+- 证明 style-speaker 解耦可行
 
-| Product Line | A: 通用零样本克隆 | B: 深度数字分身 |
-|---|---|---|
-| 输入 | 5-10s 任意参考 | 30 min-数小时单人语料 + 授权 |
-| 目标 | 任何人都能 5 秒可用 | 极致还原 IP/演员/主播 |
-| 用 LoRA 吗 | ✅ 多说话人 style LoRA（保留泛化） | ✅ 单说话人 avatar LoRA（拥抱过拟合） |
-| 商业场景 | 通用 TTS API | B 站头部主播配音 / 演员授权 / 企业高管分身 |
+### 1.4 方法论教训 (exp_004)
 
-**两条线共享同一个技术瓶颈**：style 控制与 speaker 保真的冲突。**双层 LoRA 架构能同时解两条线**。
+- `<|endofprompt|>` token 放置错误导致虚假的"语义泄漏"发现
+- 修正流程：先对比官方 example，再大规模实验
+- Memory: `feedback_check_official_first`
 
-### 2.4 官方 CosyVoice 3 Benchmark（参考对标）
+### 1.5 正确基线 (exp_005)
 
-[CosyVoice README](https://github.com/FunAudioLLM/CosyVoice) 公布的 hard-set 对比：
-
-| Model | hard-zh WER | hard-zh SS | hard-zh DNSMOS | hard-en WER | hard-en SS | hard-en DNSMOS |
-|---|---|---|---|---|---|---|
-| CosyVoice 2 | 12.58 | 72.6 | 3.81 | 11.96 | 66.7 | 3.95 |
-| **CosyVoice3-0.5B** | **14.15** ⚠️ | **78.6** ✅ | 3.75 | **9.04** ✅ | **75.9** ✅ | 3.92 |
-| CosyVoice3-1.5B | 9.77 | 78.5 | 3.79 | 10.55 | 76.1 | 3.95 |
-| CV3-0.5B + DiffRO | 8.26 | 77.8 | 3.80 | 7.60 | 73.9 | 3.95 |
-
-**关键观察**：
-- **SS 显著提升**：v3 英文 SS +9.2pp (66.7→75.9)，中文 SS +6.0pp (72.6→78.6)
-- **中文 WER 退化**：v3 中文 WER +1.57pp (12.58→14.15)——多语言平衡偏向了英文
-- **英文 WER 大幅改进**：v3 英文 WER -2.92pp (11.96→9.04)
-- **SS 天花板**：v3-0.5B 的 SS 天花板 ~78.6——这是 zero_shot 任意人的上限
-
-### 2.5 官方局限性（直接引用）
-
-> *"CosyVoice 3 **cannot control acoustic characteristics, such as timbre, through textual instructions**, which could be an interesting and valuable area of exploration for role-playing applications."*
->
-> —— [CosyVoice README §7 Limitations](https://github.com/FunAudioLLM/CosyVoice)
-
-**这意味着**：instruct mode 与 speaker timbre 之间的冲突是**官方声明未解决**的公开问题。本 RESEARCH_PLAN 的 Tier 1 LoRA 直接对标这一局限性。
-
-### 2.6 成功标准（对标官方数据）
-
-| 目标 | CV3 官方 baseline | Style LoRA 目标 | 失败条件 | 对标 |
-|---|---|---|---|---|
-| instruct ΔSS (en) | ? (官方未公布) | **≤ 3pp 退化** | > 5pp | 官方 "cannot control timbre" |
-| instruct ΔSS (zh) | ? | **≤ 3pp 退化** | > 5pp | 同上 |
-| 中文 WER | **14.15** ⚠️ | **≤ 12.0**（追平 v2） | > 13.5 | 官方 benchmark |
-| 英文 WER | 9.04 | 保持不变 | > 10.0 | 不破坏已改进项 |
-| 英文 SS (zero_shot) | 75.9 | 保持 | < 73.0 | 不破坏 v3 提升 |
-| 中文 SS (zero_shot) | 78.6 | 保持 | < 76.0 | 同上 |
-| **Semantic Leakage Rate (Sad)** | **~0.5 (exp_003 估算)** | **≤ 0.15** | > 0.3 | 基座缺陷，#3 |
-
-**注意**：Tier 2 (avatar LoRA) 已从研究计划移除——属商业产品线 (Line B)，不适合当前求职导向。见 [memory: project_avatar_lora_shelved](../.claude/projects/-Users-attention-Documents-projects-voice-story/memory/project_avatar_lora_shelved.md)。
+- 正确格式下 720 合成，建立 CV3 情感合成完整基线
 
 ---
 
-## 3. 问题拆分解决 (Decomposition)
+## 2. 后续研究方向
 
-### 3.1 子问题 1：评测框架的严谨性 (P1: must)
+### 方向 1：高唤醒情绪 F0 传递优化
 
-**为什么这个先**：没有可信 eval，后面任何"LoRA 提升了 X%"都站不住。
+**问题**：Surprise F0 RMSE (83.9 Hz) 是 Neutral (46.0 Hz) 的 1.8 倍。这是真实的模型能力边界。
 
-#### 已完成 ✅
-- [x] [core/eval_tts.py](../core/eval_tts.py) — 四维客观指标
-- [x] [exp_002 eval_objective.md](../experiments/exp_002_ref_and_instruct/eval_objective.md) — 16 wav baseline 表
-- [x] [api/server.py](../api/server.py) `/api/eval/{syn_id}` 异步 hook + WebUI 卡片
-- [x] 验证 DNSMOS-P808 在 TTS 输出上 mis-rank（用 NISQA 替代为主指标）
+**实验**：
+- System prompt 消融：不同 prompt 是否影响 F0 传递？
+- 参考音频筛选：同一情感内，选择 F0 更稳定的 ref 是否改善？
+- 多 ref 平均：合并多个 ref 的韵律信号
 
-#### 待加固 🟡
-- [ ] **SECS_vs_gold 协议**——避免 ref leakage 假阳性
-  - 训练时 val: SECS(syn, gold_clip_of_same_speaker) 而不是 SECS(syn, training_ref)
-  - 测试时三层对比：SECS_vs_ref（克隆精度） / SECS_vs_gold（音色保真） / SECS_cross（说话人表示一致性）
-- [ ] 主观 SMOS / NMOS 收集 UI（WebUI 扩展，盲听打分）
-- [ ] Pearson 校准脚本（主观 ★ vs 客观 4 指标）
+### 方向 2：系统提示词作为控制杆
 
-#### 待扩展 ⏳ (可选求职亮点)
-- [ ] Chinese TTS Benchmark harness：5 个 TTS backend 横向对比，标准化文本 + 自动 eval
+**问题**：官方 prompt 是英文的 `"You are a helpful assistant."`。中文 prompt 或情感相关 prompt 是否改变行为？
 
-### 3.2 子问题 2：多说话人 Style LoRA 解决 style-speaker 冲突（核心）
+**实验**：
+- 中文 prompt vs 英文 prompt 对比
+- 情感提示词（如 "Speak with a sad tone."）的效果
+- Prompt 对高唤醒情绪 F0 传递的影响
 
-**架构**：单 LoRA，双目标。
+### 方向 3：参考音频质量因素
 
-```
-           CosyVoice 3 (0.5B)
-                    │
-                    │  PEFT LoRA (rank=16, qkvo)
-                    │  冻结: Flow + HiFT
-                    ▼
-           ┌─────────────────────────┐
-           │  Style-following LoRA   │
-           │  训练数据:               │
-           │  ESD 20 spk × 5 emo     │
-           │  + AISHELL-3 218 spk    │
-           │  中英样本权重 2:1 (中文)  │
-           │  style-balanced batch   │
-           └──────────┬──────────────┘
-                      │
-           ┌──────────┴──────────┐
-           ▼                     ▼
-     目标 #1                 目标 #2
-   instruct ΔSS ≤ 3pp      中文 WER ≤ 12.0
-   (官方 limitations)       (修复 v3 退化)
-```
+**问题**：40 个 ref 的质量差异（时长、SNR、F0 稳定性）如何影响合成？
 
-**核心假设**：在多说话人 + 多 style + 中英混合数据上训 LoRA，模型同时学到两件事：
-1. style-following 是一种可迁移能力——不牺牲 speaker fidelity（目标 #1）
-2. 中文 token 的权重分配被纠正——追平 v2 的 WER 水平（目标 #2）
+**实验**：用 exp_005 数据做 ref 特征与 CER/SECS/F0 RMSE 的相关性分析
 
-**为什么一个 LoRA 能同时解决两个问题**：
-- #1 的 root cause 是 conditioning 冲突（style vs speaker 在 attention 里互扰）→ LoRA 学一个解耦的 routing
-- #2 的 root cause 是 v3 训练语种平衡偏英 → LoRA 中文数据主导（2:1）可以纠正 token-level prediction bias
+### 方向 4：长文本合成稳定性
 
-**为什么不做双层 LoRA**：Tier 2 (单说话人 avatar LoRA) 属于商业产品线 (Line B)，不适合当前求职导向的研究项目。**如果后续启动 Line B 产品化，Tier 2 的训练逻辑已完全就绪**（datasets/two_tier/tier2_train.jsonl 408 对，见 [memory: project_avatar_lora_shelved](.../memory/)）。
+**问题**：CV3 单句表现好，但长文本（段落级）是否保持质量？
 
-| 项 | 配置 |
-|---|---|
-| 训练数据 | ESD (20 spk × 5 emo) + AISHELL-3 (218 spk) |
-| 数据规模 | ~27000 三元组 `(text, ref_same_spk_diff_style, target)` — [datasets/two_tier/tier1_train.jsonl](datasets/two_tier/tier1_train.jsonl) |
-| Speaker 总数 | 234 (20 ESD + 218 AISHELL-3 - 4 holdout) |
-| LoRA 配置 | rank=16, target_modules=qkvo |
-| 中文:英文样本比 | **2:1** (AISHELL-3 权重加倍) —— 对齐目标 #2 |
-| Batch sampler | style-balanced 且强制中英混合：每 batch 含 50% 中文 + 50% 英文 |
-| 验收 | unseen-speaker SS 保持 + instruct ΔSS ≤ 3pp + zh WER ≤ 12.0 |
-
-#### 消融实验
-
-| 消融项 | 为什么做 |
-|---|---|
-| **中文权重 1:1 vs 2:1 vs 3:1** | 验证"中文 bias 修复 WER"的因果链 |
-| **rank 4 vs 8 vs 16 vs 32** | 找到性价比 sweet spot |
-| **target_modules qv vs qkvo vs qkvo+mlp** | attention-only vs 加 FFN |
-| **ESD only vs ESD+AISHELL-3** | 验证 speaker 多样性的重要性 |
-
-### 3.4 子问题 4：Semantic Leakage — 证伪 B，修正 C
-
-**发现级别**：基座模型缺陷，非 LoRA 引入。
-
-**评测指标**：新增 Semantic Leakage Rate (SLR)
-- ASR 输出与 ref_text 的字符重叠率
-- SLR = 0 表示完全不泄露，SLR > 0.3 表示严重泄露
-
-#### 3.4.1 Approach B: Content-Masked Speech Tokens — ❌ 证伪
-
-2026-05-28 消融实验证实：**mask speech token 反而增加泄漏**。
-
-| Text | SLR_nomask | SLR_prefix (mask 86%) | SLR_energy (mask 80%) |
-|---|---|---|---|
-| zh_news | 0.033 | 0.382 | 0.259 |
-| zh_prose | 0.042 | 0.343 | 0.216 |
-
-根因：mask speech token → 模型失去韵律条件 → 退化到 speaker embedding → embedding 携带更强的语义偏差 → 泄漏加剧。
-
-#### 3.4.2 Approach C: Dual-Path Content-Suppressed Conditioning（修正版）
-
-**实验已证实**：
-- Speech token 置零后模型**仍能生成可懂语音** → prosody-only 架构可行
-- Speaker embedding 是**更强的泄漏源** → 也需要 content suppression
-
-**修正后方案**：同时修两路
-
-```
-Ref Audio ──┬──► CAM++ ──► [Content Suppression] ──► speaker_embedding (192-dim)
-            │              (对抗训练或 projection     "谁在说话，但不说什么"
-            │               让 embedding 忘掉语义)
-            │
-            ├──► F0 + Energy + Voiced ──► Prosody Projection ──► prosody_embedding
-            │    (librosa.pyin + RMS)       (Linear 3→64→192)    "怎么说话"
-            │
-            └──► (speech token 通道移除)
-```
-
-**两路各做什么**：
-
-| 路 | 输入 | 输出 | 训练方式 |
-|---|---|---|---|
-| Speaker (content-suppressed) | CAM++ embedding | speaker_embedding (192-dim) | 对抗训练：加一个轻量分类器从 embedding 猜 ref_text，encoder 通过梯度反转学习欺骗分类器 |
-| Prosody | F0 contour + energy + voiced_flag | prosody_embedding (192-dim) | 投影层 + cross-attention into LLM |
-
-**与目标 #1 的统一**：SLR 和 instruct ΔSS 是同一个深层问题（conditioning 无解耦）的两种表现。方案 C 修的是根因，一旦跑通，两个目标同时受益。
-
-### 3.3 子问题 3：跨架构泛化（P3: optional，求职亮点）
-
-**问题**：双层 LoRA 的设计是否依赖具体 base 架构？还是普适？
-
-**实验**：把 Phase 2 最优 config 端口到 3 个 base：
-- CosyVoice 2 (AR + Flow Matching) — 已集成
-- F5-TTS (pure Flow Matching) — 需新 backend
-- IndexTTS (AR + BigVGAN) — 需新 backend
-
-**指标对比**：3 个 base × 4 维 eval = 一张研究表。可能 finding：
-
-> "Flow-matching 架构（F5-TTS）相比纯 AR（IndexTTS）从 LoRA 中获益更多 / 更少"
-
-**复用现有 TTSBackend Protocol**（[core/tts.py:60](../core/tts.py#L60)）——之前曾质疑过它是 YAGNI 设计，**这次将第三次派上用场**。
-
----
-
-## 4. 执行计划
-
-### 4.1 当前状态（Week 0）
-
-✅ 已完成：
-- 客观 eval 框架（4 维指标 + 集成进 WebUI）
-- exp_002 baseline 报告
-- 问题精确定义 + 两产品线区分
-- 双层 LoRA 架构设计
-
-### 4.2 接下来 6-7 周
-
-| Week | 任务 | 产出 | GPU 成本 |
-|---|---|---|---|
-| 1 | 数据准备（ESD + AISHELL-3 + Trump 跑 M1 pipeline 统一 manifest）| `scripts/build_two_tier_dataset.py` + 3 个 jsonl split | $0 |
-| 2-3 | Tier 1 Style LoRA 训练 + eval | `experiments/exp_004_tier1_style_lora/` + 报告 | ~$15 |
-| 4-5 | Tier 2 Avatar LoRA 训练 + eval | `experiments/exp_005_tier2_avatar_lora/` + 报告 | ~$10 |
-| 6 | Composition 实验 + ablation | `experiments/exp_006_lora_composition/` + 报告 | ~$10 |
-| 7 | 综合报告 + GitHub README + demo video | 简历项目 deliverable | $0 |
-
-预算总和：**$30-40 GPU**，约 30-40 小时云上训练 + eval。
-
-### 4.3 与现有 ROADMAP 的对齐
-
-| ROADMAP 里程碑 | 本计划如何映射 |
-|---|---|
-| M3 评估闭环 | **完善并落地**——eval_tts.py 已建，加 SECS_vs_gold 协议、主观打分系统 |
-| M5 LoRA 微调 | **重新定义**——从模糊的"LoRA"变成具体的"双层 LoRA + 跨架构对比"；[ADR-0004](decisions/0004-lora-finetuning.md) 仍成立，但本计划提供具体子决策 |
-
----
-
-## 5. 风险登记 + 决策记录
-
-### 风险
-
-| 风险 | 影响 | 缓解 |
-|---|---|---|
-| Trump 数据情绪单一（都是商业演讲） | Tier 2 ceiling 低 | 报告中诚实标出；不声称"production-grade avatar" |
-| ESD 体量小（5 emotion × 350 句 / 人） | Tier 1 训练不充分 | 加 LibriTTS-R / AISHELL-3 多样性补足 |
-| LoRA 反而破坏 unseen-speaker SECS | Line A 失败 | early stop by unseen SECS（非 training loss） |
-| 跨 base 移植（F5-TTS, IndexTTS）工程量大 | Week 6+ 加班 | 子问题 3 设为 optional，时间紧就砍 |
-| NISQA 在 TTS 输出上方向不准（[exp_002 已证实](../experiments/exp_002_ref_and_instruct/eval_objective.md)）| 自然度判断不可靠 | 主观 SMOS 校准 + 后续考虑 UTMOS（待 fairseq 解决） |
-
-### 决策记录（链接到 memory）
-
-- 暂存 emotion orchestrator → [memory: project_stashed_emotion_orchestrator](../.claude/projects/-Users-attention-Documents-projects-voice-story/memory/project_stashed_emotion_orchestrator.md)
-- 两产品线区分 + LoRA 策略 → [memory: project_no_single_speaker_lora](../.claude/projects/-Users-attention-Documents-projects-voice-story/memory/project_no_single_speaker_lora.md)
-- DNSMOS-P808 → NISQA 替换（仍为 stand-in，UTMOS 待解锁）→ [eval_tts.py docstring](../core/eval_tts.py)
-
----
-
-## 6. 资产清单
-
-### 已有（直接复用）
-
-| 资产 | 用途 |
-|---|---|
-| [core/eval_tts.py](../core/eval_tts.py) | 四维客观评测 |
-| [core/tts.py](../core/tts.py) `TTSBackend` Protocol | 跨架构 LoRA 对比的接口基础 |
-| [core/asr.py](../core/asr.py) `Transcriber` | WER cycle + 上传音频 ASR |
-| [api/server.py](../api/server.py) + [webui/](../webui/) | 合成 + eval + 反馈闭环 |
-| [agents/dataset_agent.py](../agents/dataset_agent.py) M1 pipeline | ESD / AISHELL-3 数据预处理 |
-| [datasets/trump_wef/manifest.jsonl](../datasets/trump_wef/manifest.jsonl) | Tier 2 训练源 |
-| [experiments/exp_002_ref_and_instruct/](../experiments/exp_002_ref_and_instruct/) | Baseline 数据 |
-
-### 待建
-
-- `scripts/build_two_tier_dataset.py` — 数据集构建（Week 1）
-- `scripts/train_lora.py` — LoRA 训练入口（Week 2）
-- `scripts/eval_lora_ablation.py` — 多 checkpoint 批量 eval
-- `experiments/exp_004_tier1_style_lora/`
-- `experiments/exp_005_tier2_avatar_lora/`
-- `experiments/exp_006_lora_composition/`
-- 可选：`experiments/exp_007_cross_base_ablation/`（CosyVoice / F5 / IndexTTS）
-
----
-
-## 7. 求职故事 (Elevator Pitch)
-
-> "CosyVoice 3's official documentation states it **'cannot control acoustic characteristics, such as timbre, through textual instructions.'** I quantified this limitation using an independent 4-axis eval framework (NISQA/SECS/WER/F0), and found two concrete degradations in v3's official benchmark: instruct mode's speaker fidelity trade-off (unmeasured by the authors) and a Chinese WER regression (12.58→14.15).
->
-> I built a **multi-speaker style LoRA** on ESD (20 speakers × 5 emotions) + AISHELL-3 (218 speakers) with a Chinese-weighted balanced batch strategy. The single LoRA addresses both issues simultaneously: cross-emotion speaker pairs teach style-speaker decoupling, while the 2:1 Chinese sample ratio corrects v3's English-leaning token distribution.
->
-> Result targets: instruct ΔSS ≤ 3pp (vs undisclosed baseline, directly addressing the stated limitation) and Chinese WER back to ≤ 12.0 (repairing v3 regression). All validated on my independent eval suite, $20 GPU cost, 100% reproducible."
-
----
-
-## 8. 参考资源
-
-### 数据集
-
-- **ESD** (Emotional Speech Dataset) — multi-speaker × 5 emotions ([github.com/HLTSingapore/Emotional-Speech-Data](https://github.com/HLTSingapore/Emotional-Speech-Data))
-- **AISHELL-3** — Chinese multi-speaker baseline
-- **LibriTTS-R** — English multi-speaker baseline
-- **SOMOS** — 主观 MOS 校准（可选）
-
-### 关键论文
-
-- UTMOS (VoiceMOS Challenge 2022 winner; pip 安装受 fairseq 阻塞)
-- NISQA (current MOS predictor in use)
-- SpeechAlign — DPO for TTS (Phase B 备选方向，已暂搁置)
-
-### 模型
-
-- **CosyVoice 2** — 当前主 backend，[ADR-0004](decisions/0004-lora-finetuning.md) 已批准 LoRA
-- **F5-TTS** — 备选，flow-matching 单段式架构
-- **IndexTTS** — 备选，autoregressive + 双 reference 设计
-- **GPT-SoVITS** — 备选，社区 LoRA 生态最厚（但情感场景不强）
-
-### 工具栈
-
-- `peft` — LoRA composition API（adapter stacking）
-- `jiwer` — WER/CER（已装）
-- `speechmos` — DNSMOS-P808（辅助）
-- `nisqa` — primary MOS predictor
-
----
-
-## 9. 关联文档
-
-- **[AUTODL_H800_GUIDE.md](AUTODL_H800_GUIDE.md)** — H800 实例创建 + 环境搭建 + 数据下载 + train/inference 分工 + 中文数据集策略
-- [PLAN.md](PLAN.md) — 架构文档
-- [ROADMAP.md](ROADMAP.md) — 里程碑跟踪
-
-## 10. 文档维护
-
-- 本文档每个 milestone 后**更新一次**
-- 新发现 / 新决策 → 加入 §5 决策记录
-- 任何"砍掉"的方向 → 移到 [memory](../.claude/projects/-Users-attention-Documents-projects-voice-story/memory/) 而非删除
-- 与 [PLAN.md](PLAN.md) / [ROADMAP.md](ROADMAP.md) 的事实冲突 → 优先以本文档为准（更新），并在 [CHANGELOG.md](CHANGELOG.md) 标注
+**实验**：递增文本长度的合成质量曲线，找到退化点
