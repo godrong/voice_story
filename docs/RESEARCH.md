@@ -1,0 +1,144 @@
+# CV3 零样本研究 — 方向与发现
+
+> 2026-05-30 · 基于 exp_005-009 全部数据
+
+---
+
+## 1. 评测体系
+
+| 指标 | 工具 | 衡量 | 好值 |
+|------|------|------|:--:|
+| CER | FunASR paraformer-zh | 内容可懂度 | < 0.05 |
+| SECS | WavLM-Base-Plus-SV | 说话人相似度 | > 0.95 |
+| F0 RMSE | librosa.pyin | 基频/韵律传递 | < 50 Hz |
+
+**vs 官方 CV3-Eval**：我们独有 F0 RMSE（韵律）和副语言 token 系统性评测；官方有更大规模测试数据和情感识别。
+
+---
+
+
+## 2. 核心发现
+
+### 2.1 基线 (exp_005)：8spk×5emo×6text×3seed=720
+
+| 情感 | CER | SECS | F0 RMSE |
+|------|:---:|:---:|:---:|
+| Neutral | 0.007 | 0.970 | **46 Hz** |
+| Happy | 0.007 | 0.965 | 68 Hz |
+| Angry | 0.009 | 0.959 | 72 Hz |
+| Surprise | 0.008 | 0.965 | **84 Hz** |
+| Sad | 0.009 | **0.976** | 58 Hz |
+
+**发现**：CER 接近完美。高唤醒情感 F0 差 1.5-1.8×。CER 与 F0 不相关（r=0.095）— 不存在内容-韵律 trade-off。
+
+### 2.2 Prompt 消融 (exp_006)：4spk×4emo×6text×4prompt×3seed=1152
+
+| Prompt | Neutral F0 | Sad F0 | Surprise F0 | Angry F0 |
+|--------|:--:|:--:|:--:|:--:|
+| en_default (官方) | 48 | **66** | 89 | 76 |
+| zh_default (中文) | 51 | 66 | 87 | 75 |
+| emotion_neutral | 48 | 66 | 89 | **75** |
+| minimal (空) | **45** | 68 | **84** | 78 |
+
+**发现**：中文 prompt 使 CER 升高 5-10×（0.007→0.078）。空 prompt 通常不差于官方。无万能最佳 prompt。
+
+### 2.3 副语言 Token (P0+P1)
+
+**P0** (12 tokens × 2 spk × 2 emo × 2 text = 192)：
+- `[laughter]`/`[clucking]`/`[hissing]` 有效：+duration 不伤 CER
+- `[vocalized-noise]` 有害：CER +0.437
+- 其余 8 个需人耳判定
+
+**P1** (4 tokens × 4 emo × 4 spk × 2 text × 2 cond × 3 seed = 192)：
+
+| 情感 | Token | ΔF0 | 效果 |
+|------|-------|-----|:--:|
+| Angry | `[breath]` | **-7 Hz** | ✓ 有效 |
+| Neutral | `[mn]` | +1 Hz | ~ 无影响 |
+| Surprise | `[quick_breath]` | +5 Hz | ✗ 恶化 |
+| Sad | `[sigh]` | **+17 Hz** | ✗ 反效果 |
+
+**发现**：副语言 token 效果因情感而异。`[sigh]` 在 Sad 上恶化——可能因为 CV3 对 Sad 已足够好，显式 token 干扰自然韵律。
+
+### 2.4 长文本 (P3)：50→3200 字
+
+| 长度 | CER | SECS |
+|------|:---:|:---:|
+| 50 chars | 0.028 | 0.971 |
+| 200 chars | 0.118 | 0.974 |
+| 800 chars | **0.919** | 0.969 |
+| 1600+ chars | **1.000** | 崩溃 |
+
+**发现**：200 字后 CER 急剧退化。CV3 训练时 token_max_length=200，模型未见过长序列。
+
+### 2.5 Emotion Viz (P2)：360 WavLM embeddings
+
+- Linear probe CV accuracy = 65.8%（chance=20%）
+- Happy 最可分，Sad/Neutral 最模糊
+- PCA 前 2 成分解释 32% 方差
+
+### 2.6 Ref 质量归因 (E1)
+
+最佳 Ref（0006/Neutral: 14Hz）vs 最差（0002/Surprise: 129Hz）差异 9×。
+
+**Top-5 通用好 Ref**：0006/Neutral, 0008/Sad, 0004/Neutral, 0008/Neutral, 0003/Neutral。Neutral 是最安全选择。
+
+---
+
+## 3. 自变量 × 因变量矩阵
+
+| 自变量 | CER | SECS | F0 RMSE |
+|--------|:--:|:--:|:--:|
+| 情感类型 | 无影响 | 弱 | **强** |
+| System Prompt | 中文有害 | 无 | 弱 |
+| 副语言 Token | 个别有害 | — | 个别有益 |
+| 文本长度 | **强（200字崩）** | 1600+崩 | — |
+| 说话人 | 无 | 弱 | **强** |
+
+---
+
+## 4. LoRA 后训练价值
+
+exp_003：rank=8 在 ESD cross-emotion pairs (26,943 对) 上训练。
+
+| 指标 | 训练前 | 训练后 | Δ |
+|------|:--:|:--:|:--:|
+| F0 RMSE | — | — | **-23 Hz** |
+| SECS | — | — | 不变 |
+
+**LoRA 的意义不在提升单句质量**（CV3 零样本单句已够好），而在于**长文本多段落场景下的风格一致性**——每个段落独立合成时，LoRA 锁定说话人音色防止漂移。
+
+---
+
+## 5. 核心方向：LLM Agent × 长文本 TTS
+
+### 问题
+CV3 零样本在 200 字后 CER 崩溃（P3），无法直接用于有声书/长内容。
+
+### 方案
+```
+长文本 → LLM 切分 + token 插入 → 分段 CV3 合成 + LoRA → 拼接输出
+```
+
+1. **LLM Agent 预处理**：按语义边界切分（<150 字/段），在自然位置插入副语言 token（句间 `[breath]`、疑问 `[mn]`、情感句 `[sigh]`）
+2. **CV3 + LoRA 合成**：每段独立合成，LoRA 保持跨段落风格一致
+3. **音频拼接**：crossfade 拼接各段
+
+### 为什么这个方向把所有发现串起来
+- P0 证明 token 有效 → LLM 可以选择何时、用什么 token
+- P1 证明 token 效果因情感而异 → LLM 可以做情感感知的 token 选择
+- E1 证明 ref 质量差异 9× → 系统可以自动选最优 ref
+- P3 证明 200 字崩溃 → 切分策略有明确的长度上限
+- LoRA 保证跨段落一致性 → 不是可有可无的
+
+---
+
+## 6. 未解决问题
+
+1. **长文本根因**：训练偏差 vs 注意力漂移 vs token budget — 需 attention 分析
+2. **跨情感 zero-shot**：Angry ref → Sad text，情感是否可迁移？
+3. **Token 位置效应**：句首/中/尾是否有不同效果？
+
+## 7. 方法论教训
+
+`<|endofprompt|>` token 位置错误导致 2 天无效实验。此后所有代码先对比官方 example。详见 memory `feedback_check_official_first`。

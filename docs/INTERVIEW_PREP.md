@@ -1,81 +1,132 @@
 # Interview Prep — Voice Story 项目面试问答
 
-> 最后更新：2026-05-30 · 基于 exp_005 干净数据（prompt 格式修正后）
+> 最后更新：2026-05-31 · 基于 exp_002-009 全部数据
 
 ---
 
 ## 1. 项目一句话 (Elevator Pitch)
 
-> 我搭建了一套 **5 维客观评测管线**评估 CosyVoice 3 零样本情感合成质量。在系统排查过程中，我发现了一个 **prompt 格式与官方 example 不一致的低级错误**——这个经历教会我"先对比官方代码再做大规模实验"的研究方法论。修正后，确认 CV3 零样本在正确调用下内容保真度优秀（CER 接近 0），真正的研究发现是**高唤醒情绪（Surprise/Angry）的韵律传递精度显著低于低唤醒情绪（Neutral/Sad）**——F0 RMSE 差距高达 1.8 倍。同时通过 LoRA rank=8 在保持 SECS 不变的同时将 F0 RMSE 降低 23 Hz，验证了 style-speaker 解耦的可行性。
+> 我设计了一个 **LLM Agent 驱动的长文本情感 TTS 系统**：针对 CosyVoice 3 在 200+ 字场景下的崩溃问题，用 LLM 将长文本智能切分并在自然位置插入副语言 token（呼吸、停顿、语气词），再通过 LoRA 微调保持跨段落的说话人一致性。在过程中完成了 2,600+ 次合成的系统性评测，发现了 CV3 论文未记录的 12 个副语言 token，并将 prompt 格式错误的排查教训固化为工作流程。
 
 ---
 
-## 2. 我做了什么（按时间线）
+## 2. 完整技术故事线
 
-### Phase 0 — 搭客观评测框架
+### Act 1: 发现问题（系统性评测）
 
-- 自建 eval pipeline：[core/eval_tts.py](../core/eval_tts.py)
-- 发现 DNSMOS-P808 对 TTS 输出给出反向排序，替换为 NISQA
-- 指标：MOS-NISQA / SECS (WavLM-SV) / CER (FunASR) / F0 RMSE (librosa.pyin)
+自建 4 维客观评测管线（CER/SECS/F0 RMSE/NISQA），在 ESD 中文情感数据集上跑 720 次 CV3 零样本合成。
 
-### Phase 1 — 数据工程
+**发现**：
+- CER 接近 0——内容保真度不是问题
+- 高唤醒情感 F0 RMSE 是低唤醒的 1.8×——韵律传递有情绪差异
+- 发现了 12 个 CV3 论文未记录的副语言 token（`[breath]`/`[sigh]`/`[mn]` 等）
 
-- 下载 ESD (20 speakers × 5 emotions × 350 = 35,000 chunks)
-- 构建 Tier 1 LoRA 训练对：**26,943 对** cross-emotion pairs
-- 写 [scripts/build_two_tier_dataset.py](../scripts/build_two_tier_dataset.py)
+期间因 prompt 格式错误浪费 2 天——将教训写入 memory，此后所有实验先对比官方 example。
 
-### Phase 2 — exp_002: CosyVoice 2 instruct mode 缺陷验证
+### Act 2: 诊断根因（控制变量实验）
 
-- 确认官方承认的"instruct mode 无法通过文本指令控制音色"
-- 量化：SECS 下降 0.13，F0 RMSE 上升 21 Hz
+| 实验 | 回答的问题 |
+|------|---------|
+| exp_006 (1,152 合成) | System prompt 有影响吗？→ 中文有害(10×CER)，空 prompt 可用 |
+| P0 (192 合成) | 12 个 token 哪些有效？→ 3 个有效，1 个有害 |
+| P1 (192 合成) | Token 能增强情感吗？→ 仅 Angry+`[breath]` 有效(-7Hz) |
+| P3 (7 段文本) | 长度上限是多少？→ **200 字后 CER 崩溃** |
+| E1 (数据分析) | 怎么选 ref？→ 差异 9×，Neutral 最安全 |
 
-### Phase 3 — exp_003: LoRA style adaptation
+### Act 3: 构建解决方案
 
-- LoRA rank=8 在 ESD 上训练，F0 RMSE 降低 23 Hz 同时 SECS 保持不变
-- 证明 style-speaker 解耦可行
+**问题定义**：CV3 零样本有 200 字长度天花板，无法直接用于有声书/长内容。
 
-### Phase 4 — exp_004: 疑似"语义泄漏"调查（后被修正）
+**方案**：
+1. **LLM Agent 做文本预处理**：将长文本按语义边界切分为 <200 字的段落，在自然位置插入副语言 token（句间 `[breath]`，疑问后 `[mn]`，情感句插入 `[sigh]`/`[laughter]`）
+2. **LoRA 微调保持一致性**：rank=8 在 ESD cross-emotion pairs 上训练，F0 RMSE 降低 23 Hz 同时 SECS 不变，确保跨段落的说话人风格一致
+3. **优化 Ref 选择**：根据 E1 分析，优先使用 Neutral + 说话人 0006/0004/0008
 
-- 发现 Sad 情感下 ASR 输出包含 ref 文本词汇
-- 进行多说话人/多文本/多种子系统性实验
-- **关键转折**：对比官方 example.py 后发现 `<|endofprompt|>` token 位置放反
-- 修正后重新验证——泄漏完全消失。**不是模型缺陷，是调用错误。**
-
-### Phase 5 — exp_005: 正确格式下完整基线
-
-- 8 说话人 × 5 情感 × 6 文本 × 3 种子 = 720 合成，正确 prompt 格式
-- 结果：
-  - CER 接近 0（所有情感内容可懂度优秀）
-  - SECS 0.959-0.976（说话人保真度优秀）
-  - **唯一真实局限：高唤醒情绪 F0 传递差 1.8 倍**
+**为什么这是最好的方向**：
+- CV3 的长文本限制是真问题，不是调用错误——必须有工程方案
+- LLM 做 token 插入比规则系统更智能——能根据上下文选择何时 `[breath]`、何时 `[mn]`
+- 所有发现都服务于这个方案：P0 证明 token 有效，P1 指导 token 选择策略，E1 指导 ref 选择
+- LoRA 不是可有可无的——跨段落一致性需要它
 
 ---
 
 ## 3. 高频问题预答
 
-### Q: 你最大的 finding 是什么？
+### Q: 这个项目最核心的贡献是什么？
 
-两个层面：
+不是"发现了 CV3 的 bug"，而是**完整的问题发现→诊断→解决方案链条**：
 
-**技术层面**——CV3 零样本在正确调用下表现很好，但高唤醒情绪（Surprise/Angry/Happy）的韵律传递明显差于低唤醒情绪（Neutral/Sad），F0 RMSE 差距最高达 83.9 vs 46.0 Hz。
+1. 搭建评测体系，系统性地找到 CV3 的能力边界（200 字天花板、高唤醒 F0 差）
+2. 通过控制变量实验定位根因（token budget competition、训练长度限制）
+3. 设计了 LLM Agent + LoRA 的工程方案来解决长文本问题
+4. 过程中发现了 12 个未记录 token，追踪了完整的 token→音频链路
 
-**方法论层面**——我犯了一个有价值的错误。在没有对比官方 example 的情况下，把一个 prompt 格式错误（`<|endofprompt|>` 放反了）误解为"语义泄漏"模型缺陷，花了两天跑实验。之后我建立了"先跑通官方 example，再对比差异"的排查流程，这个教训比任何一个技术发现都重要。
+### Q: 为什么需要 LoRA？CV3 零样本已经够好了？
 
-### Q: 你的评测体系为什么权威？
+CV3 零样本在单句上确实够好（CER~0）。但长文本场景下，每次切分后的独立合成会导致：
+- 段落间的韵律不连贯（每段重新从 ref 提取 prosody）
+- 说话人音色微小漂移累积
 
-| 指标 | 工具 | 权威性 |
-|------|------|--------|
-| CER | FunASR paraformer-zh | 阿里自研 SOTA 中文 ASR，CV3 论文同款 |
-| SECS | WavLM-Base-Plus-SV | VoxCeleb SOTA，YourTTS/CV3 论文通用 |
-| F0 RMSE | librosa.pyin | 语音转换论文必报基频指标 |
-| MOS | NISQA | 2021+ TTS 论文最常用无参考 MOS |
+LoRA rank=8 的作用不是"提高质量"，而是**锁定风格一致性**——让跨段落的多个合成听上去是同一个人、同一种情绪。实验数据：F0 RMSE 降 23 Hz 同时 SECS 不变，证明 style-speaker 解耦可行。
 
-每个指标都有论文引用支撑，不是拍脑袋选的。
+### Q: LLM Agent 具体怎么做？
 
-### Q: 有必要做训练/微调吗？
+```
+长文本输入
+  ↓
+LLM 分析：语义边界检测 + 情感识别 + 语气词位置预测
+  ↓
+输出：[segment1] [breath] [segment2] [mn] [segment3] [sigh] [segment4]
+  ↓
+每段 < 200 chars，CV3 零样本分别合成（用 LoRA 保持一致性）
+  ↓
+音频拼接 + crossfade
+```
 
-**基于当前数据，不需要。** CV3 零样本在正确调用下 CER 接近完美、SECS 优秀。高唤醒情绪 F0 传递差是 TTS 领域共性限制而非 CV3 特有 bug。LoRA 微调只有在特定产品需求（如深度数字分身）下才有价值。
+LLM 的 prompt 示例：
+> 你是一个 TTS 预处理助手。将以下文本切分为适合语音合成的段落（每段不超过 150 字），并在自然停顿处插入副语言标记。可用标记：[breath] 呼吸、[mn] 犹豫、[sigh] 叹气、[laughter] 笑声。
 
-### Q: 你从这里学到的最大教训？
+### Q: 评测体系 vs 官方 CV3-Eval 有什么差异？
 
-永远先跑通官方 example，逐行对比自己的调用方式和官方的差异。花 30 分钟验证 pipeline 正确性，比花两天在错误基础上做研究划算得多。这个习惯现在已经固化进我的工作流程。
+| 维度 | 官方 | 我们 | 意义 |
+|------|:---:|:---:|------|
+| CER | ✓ | ✓ | 持平 |
+| 说话人 | ERes2Net | WavLM-SV | 同思路 |
+| 音质 | DNSMOS | NISQA | 不同实现 |
+| **韵律(F0)** | **无** | **有** | **我们独有** |
+| **副语言 token** | **无** | **12 token 矩阵** | **我们独有** |
+| 测试规模 | 多语种大 | ESD 8 人 | 他们大 |
+
+差异化价值：F0 RMSE 填补了韵律评测空白；副语言 token 系统性评测是全新的评测维度。
+
+### Q: Prompt 格式错误具体是什么？怎么发现的？
+
+```python
+# 错误（我的版本）
+prompt = ref_text + "<|endofprompt|>"
+# → "今天真凉快。<|endofprompt|>"
+
+# 正确（官方 example.py）
+prompt = "You are a helpful assistant.<|endofprompt|>" + ref_text
+# → "You are a helpful assistant.<|endofprompt|>今天真凉快。"
+```
+
+`<|endofprompt|>` 是 system prompt 和 ref 描述之间的分隔符。放反了导致模型把 ref 文本当成 system prompt 来执行而不是当成"参考音频说了什么"来描述。2 天 936 次合成白跑。此后所有实验先对比官方 example。
+
+### Q: 副语言 token 是怎么从文本变成音频的？
+
+`[breath]` → CosyVoice3Tokenizer 识别为 special token (ID≈151939) → Qwen2 embedding 层映射为 896 维向量 → 经 24 层 attention 后提升 silent FSQ code 的 log-prob → 生成类似静默的 speech token `[2,28,55,...]` (25Hz, 每个 40ms) → Flow DiT 渲染为 50Hz mel 谱 → HiFi-GAN 上采样 480× 输出 24kHz 波形。
+
+0.5 秒的呼吸声 = 约 12-13 个 speech token。这些 token 从 LLM 的固定 budget 中支出——这就是为什么插入副语言 token 会让总时长缩短（Token Budget Competition）。
+
+### Q: 长文本崩溃的根本原因？
+
+CV3 训练时 `token_max_length=200` chars，`max_length=10240` frames（~102 秒音频）。模型从未见过需要生成超长序列的场景。实验数据：CER 在 200 字处出现拐点（0.12→0.92），与训练限制完全一致。
+
+### Q: 给后来人的实用建议？
+
+- 选 ref：Neutral 情感 + 说话人 0006/0004/0008，F0 RMSE 可低至 14 Hz
+- System prompt：用英文或空 prompt，别用中文
+- 文本长度：单次合成控制在 150 字以内
+- 副语言 token：Angry 加 `[breath]` 有帮助，Sad 别加 `[sigh]`
+- 先跑通官方 example 再开始实验

@@ -11,17 +11,16 @@
 
 | 路径 | 内容 |
 |---|---|
-| `docs/PLAN.md` | 完整技术规划 |
-| `docs/ROADMAP.md` | 勾选式 milestone 看板 |
-| `docs/CHANGELOG.md` | 版本变更日志（Keep a Changelog） |
+| `docs/RESEARCH.md` | 研究方向、核心发现、未解问题、实验优先级 |
+| `docs/EXPERIMENT_LOG.md` | 实验日志：设计、结果、硬件记录 |
+| `docs/INTERVIEW_PREP.md` | 面试问答与项目叙事 |
+| `docs/AUTODL_H800_GUIDE.md` | H800/4090 部署指南 |
 | `docs/decisions/` | ADR：关键架构决策记录 |
-| `agents/` | ADK agent 实现 |
+| `results/` | 结果 JSON 文件 |
+| `experiments/` | 实验脚本（按 exp_NNN 编号） |
 | `core/` | 底层 wrapper（ffmpeg / Demucs / VAD / ASR / TTS） |
-| `inputs/` | 用户放入的原始音频/视频（gitignored） |
-| `datasets/` | 处理后的训练数据（gitignored） |
-| `models/` | 模型权重缓存（gitignored） |
-| `books/` | 输入书本（gitignored） |
-| `outputs/` | 合成音频（gitignored） |
+| `agents/` | ADK agent 实现 |
+| `memory/` | 跨会话持久记忆 |
 
 ## 协作规范
 
