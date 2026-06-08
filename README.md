@@ -177,6 +177,28 @@ tts.synthesize(
 
 Apple Silicon 不能跑 CUDA，TTS 走 CPU 慢 60× 不实用；可走远程 GPU（[H800 部署指南](docs/AUTODL_H800_GUIDE.md)）。RTX 4090 单卡能舒服跑：单段合成 2-5 秒、全链路（含 ASR + 评测）<10 秒。
 
+## GPU 推理配置
+
+- 推荐显卡：**NVIDIA RTX 4090 24GB**，或者同级别 CUDA 12.x GPU。
+- `cosyvoice3` 环境必须安装 CUDA 版本的 PyTorch：
+  ```bash
+  conda activate cosyvoice3
+  conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia
+  ```
+- 启动前确认 GPU 可见：
+  ```bash
+  nvidia-smi
+  conda run -n cosyvoice3 python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+  ```
+- 运行 WebUI 前设置 worker Python：
+  ```bash
+  export VOICE_STORY_CV3_PYTHON="$(conda run -n cosyvoice3 which python)"
+  ```
+- 启动服务时建议在 `ai_study` 环境中运行后端，CosyVoice 3 worker 在 `cosyvoice3` 环境中加载模型：
+  ```bash
+  conda run -n ai_study uvicorn api.server:app --host 0.0.0.0 --port 8000
+  ```
+
 ---
 
 ## 路线图 / Roadmap
