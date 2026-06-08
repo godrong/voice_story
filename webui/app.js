@@ -30,23 +30,27 @@ const { createApp, reactive, ref, computed, onMounted, watch } = Vue;
 // 与 api/prompt_compose.py 保持一致；让用户实时看到拼出的 instruct 文本。
 // ---------------------------------------------------------------------------
 
+// quality 枚举 → 中文「音质 / 风格」短语，与 _QUALITY_ZH 保持一致。
+const QUALITY_ZH = {
+  studio: "音质干净清晰",
+  broadcast: "带专业的播音腔",
+  casual: "语气轻松随意",
+};
+
 function composeInstructPreview(cfg) {
-  const parts = [];
-  if (cfg.language) parts.push(`Native ${cfg.language}.`);
+  // gender / age 故意不渲染：instruct2 模式下音色身份由参考音频决定，
+  // 写进指令既无用又会被模型读出来（"male casual" 泄漏 bug）。
+  const clauses = [];
+  if ((cfg.persona || "").trim()) clauses.push(`以${cfg.persona.trim()}的口吻`);
+  if ((cfg.emotion || "").trim()) clauses.push(`用${cfg.emotion.trim()}的情绪`);
+  if (cfg.quality && QUALITY_ZH[cfg.quality]) clauses.push(QUALITY_ZH[cfg.quality]);
 
-  const ga = [];
-  if (cfg.gender) ga.push(cfg.gender[0].toUpperCase() + cfg.gender.slice(1));
-  if (cfg.age) ga.push(`${cfg.age} age range`);
-  if (ga.length) parts.push(ga.join(", ") + ".");
+  const description = (cfg.description || "").trim();
+  if (!clauses.length && !description) return "";
 
-  if (cfg.quality) {
-    parts.push(`${cfg.quality[0].toUpperCase() + cfg.quality.slice(1)} quality.`);
-  }
-  if ((cfg.persona || "").trim()) parts.push(`Persona: ${cfg.persona.trim()}.`);
-  if ((cfg.emotion || "").trim()) parts.push(`Emotion: ${cfg.emotion.trim()}.`);
-  if ((cfg.description || "").trim()) parts.push(cfg.description.trim());
-
-  return parts.join(" ");
+  let sentence = clauses.length ? "请" + clauses.join("，") + "，说这句话。" : "";
+  if (description) sentence = sentence ? sentence + description : description;
+  return sentence;
 }
 
 const App = {

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import select
 import subprocess
 import sys
@@ -40,8 +41,18 @@ from typing import Protocol
 logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_COSYVOICE_PYTHON = "/opt/homebrew/Caskroom/miniforge/base/envs/cosyvoice/bin/python"
-DEFAULT_COSYVOICE3_PYTHON = "/opt/homebrew/Caskroom/miniforge/base/envs/cosyvoice3/bin/python"
+
+# Worker env Python interpreters. CosyVoice pins torch==2.3.1, so its worker
+# runs in a sibling conda env separate from this repo's. Override per machine
+# via env vars (CI / Linux / 4090 boxes won't have the macOS miniforge path);
+# falls back to the original local miniforge layout when unset.
+# Worker 进程的 Python 解释器。CosyVoice 钉 torch==2.3.1，跑在独立 conda env。
+# 各机器用环境变量覆盖（Linux/4090 没有 macOS miniforge 路径）；未设时回退到
+# 本地 miniforge 默认布局。
+_FALLBACK_CV_PYTHON = "/opt/homebrew/Caskroom/miniforge/base/envs/cosyvoice/bin/python"
+_FALLBACK_CV3_PYTHON = "/opt/homebrew/Caskroom/miniforge/base/envs/cosyvoice3/bin/python"
+DEFAULT_COSYVOICE_PYTHON = os.environ.get("VOICE_STORY_CV_PYTHON", _FALLBACK_CV_PYTHON)
+DEFAULT_COSYVOICE3_PYTHON = os.environ.get("VOICE_STORY_CV3_PYTHON", _FALLBACK_CV3_PYTHON)
 DEFAULT_WORKER_SCRIPT = REPO_ROOT / "core" / "tts_worker.py"
 DEFAULT_WORKER3_SCRIPT = REPO_ROOT / "core" / "cosyvoice3_worker.py"
 

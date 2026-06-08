@@ -133,12 +133,80 @@ CV3 零样本在 200 字后 CER 崩溃（P3），无法直接用于有声书/长
 
 ---
 
-## 6. 未解决问题
+## 6. exp_010: 小 LLM 中文文学标注能力边界
+
+### 问题
+LLM Agent 预处理路径（§5）需要一个 orchestrator 标注 chunk 的 role / emotion / pause_after。这件事**应该用多大的 LLM**？规则能不能替代？本实验在公版鲁迅文本上，对比 Qwen2.5-{1.5B, 3B, 7B}-Instruct-4bit 三个尺寸。
+
+### 设计
+- 语料：《阿Q正传》（Gutenberg #25332）→ OpenCC 繁→简 → 引号感知 100-300 字切分 → 92 段
+- 后端：MLX on Apple Silicon M4
+- Schema 最小版：`role` / `emotion` / `pause_after`
+- 样本：1.5B / 3B 各 50 段（idx 0-49）；7B 仅 10 段对白密集子集（idx 10-19，受 M4 散热限制）
+
+### 结果
+
+| 模型 | role top-1 | emotion top-1 | pause top-1 | 多样性 (unique) | 速度 mean |
+|---|---|---|---|---|---|
+| 1.5B-4bit | narrator @ 100% | neutral @ 100% | short @ 82% | 1/1/2 | 5.7s |
+| 3B-4bit | narrator @ 100% | neutral @ 100% | medium @ 100% | **1/1/1** | **2.1s** |
+| 7B-4bit | narrator @ 50% | neutral @ 50% | medium @ 100% | **3/3/1** | **663s** ⚠ |
+
+7B 真实 case：
+- `"你算是什么东西"` → 1.5B/3B 标 narrator/neutral；**7B 标 character_A/angry** ✓
+- 阿Q怒目而视场景 → 1.5B/3B 标 narrator/neutral；**7B 标 ambiguous/angry** ✓
+
+### 三个发现
+
+1. **4bit 量化下中文文学判断性标注能力门槛在 3B↔7B 之间**
+   - 1.5B / 3B 完全塌缩
+   - 7B 才释放出判别能力
+   - 这是目前公开实验中没有的能力曲线数据
+
+2. **3B 在确定性字段（pause_after）上够用**
+   - 句末标点 → pause 强度是规则就能做的任务
+   - 3B 100% 命中 medium，速度 2.1s 极稳
+   - **但纯规则更直接**——5 行 regex 表现一致或更好
+
+3. **M4 跑 7B 的瓶颈是散热不是显存**
+   - 7B-4bit 仅 ~5GB 显存，远低于 M4 的 16GB+
+   - sustained 推理 5-10 分钟后 thermal throttle
+   - 单 inference 从 30s 暴增到 50min/段
+   - 工程含义：本地 M4 仅适合 burst 推理，批量必须上云
+
+### 字段-能力映射（指导后续工程）
+
+| 字段 | 任务类型 | 最小可用尺寸 | 规则可替代？ |
+|---|---|---|:---:|
+| `pause_after` | 确定性（标点驱动） | 3B 或纯规则 | **✅** |
+| `role` | 浅判断（引号 + 上下文） | 7B+ | ~70% |
+| `emotion` | 深判断（语义） | 7B+ | ❌ |
+
+### 工程结论
+
+| 用例 | 推荐路径 |
+|---|---|
+| 批量标 500+ 段 | API（DeepSeek-V3 ~$0.10 / Claude Sonnet ~$2） |
+| 本地 pause-only | 3B-4bit 或纯规则 |
+| 本地 role/emotion | ❌ 不可行 |
+| 云端 7B 标注 | AutoDL H800 |
+
+### 方法论价值
+
+约 1 小时 + 0 元，廉价证伪了"本地小 LLM 可做完整 orchestrator 标注"假设，避免在 500 段上盲投。**Pilot 的目的就是廉价证伪**，本实验是范例。
+
+详见 `experiments/exp_010_orchestrator/`。
+
+---
+
+## 7. 未解决问题
 
 1. **长文本根因**：训练偏差 vs 注意力漂移 vs token budget — 需 attention 分析
 2. **跨情感 zero-shot**：Angry ref → Sad text，情感是否可迁移？
 3. **Token 位置效应**：句首/中/尾是否有不同效果？
+4. **3B prompt 工程上限**：本实验用 few-shot；CoT / structured decoding / 更密集 demonstrations 能否让 3B 跳出 collapse？
 
-## 7. 方法论教训
+## 8. 方法论教训
 
-`<|endofprompt|>` token 位置错误导致 2 天无效实验。此后所有代码先对比官方 example。详见 memory `feedback_check_official_first`。
+1. `<|endofprompt|>` token 位置错误导致 2 天无效实验。此后所有代码先对比官方 example。详见 memory `feedback_check_official_first`。
+2. **Pilot 必须先在小样本（3-10）验证全链路**，再扩到目标量级。exp_010 因此发现 1.5B 塌缩问题只花了 5 分钟，避免标 500 段后才发现。

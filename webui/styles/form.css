@@ -129,3 +129,40 @@
   gap: 8px;
   margin-bottom: 12px;
 }
+
+/* Paralinguistic token chip strip above the target textarea.
+   Dense, low-contrast by default; brightens on hover so the eye lands on
+   the textarea first and only finds the chips when reaching for them.
+   副语言 token 按钮条：默认低对比，hover 才亮起，避免抢走 textarea 视觉重心。 */
+.token-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+.token-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 3px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  color: var(--fg-muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.2;
+  transition: border-color 0.12s, color 0.12s, background 0.12s;
+}
+.token-chip:hover {
+  border-color: var(--accent-voice);
+  color: var(--fg);
+  background: var(--bg-elev);
+}
+.token-chip .chip-token {
+  color: var(--accent-voice);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  opacity: 0.7;
+}

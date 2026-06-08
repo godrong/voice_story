@@ -184,6 +184,115 @@ def _resolve_ref(ref_id: str) -> tuple[Path, str]:
     raise HTTPException(status_code=404, detail=f"unknown ref_id {ref_id!r}")
 
 
+# CV3 zero_shot anchor sizing. Official examples and ESD usage converge on a
+# short ref: ~3–5 s audio + ~15–25 chars text. Bigger prompts trigger drift
+# (prompt content leaks into output, sections skip/repeat — see 2026-06-02
+# bench, suspect-B confirmed). Floor at ~3 s / 15 chars: below this CV3
+# zero_shot collapses to ~0.5 s silence.
+# CV3 短锚策略：照 ESD/官方 example 的尺寸（3-5 秒，15-25 字），ref 长不缩放
+# 到 target 长度——只要 ref 处于"短锚"形态，long target 也不漂。
+_FIT_AUDIO_MIN_SEC = 3.0
+_FIT_AUDIO_MAX_SEC = 5.0
+_FIT_TEXT_MIN_CHARS = 15
+_FIT_TEXT_MAX_CHARS = 30
+# Below this duration we use the upload AS-IS (no clipping). CV3 handles
+# 10–15 s anchors well; clipping slow/sparse speakers to a 3–5 s window
+# produced degenerate fragments (e.g. a name cut mid-word) that wrecked
+# speaker similarity. Only refs LONGER than this go through the fit walk.
+# 低于此时长的上传直接整段用、不裁。CV3 对 10-15s 锚点表现很好；把慢语速
+# 说话人硬裁到 3-5s 会产生残片（名字切一半等），严重伤音色相似度。
+# 只有超过此阈值的 ref 才走裁剪逻辑。
+_FIT_REF_NOCLIP_SEC = 15.0
+
+
+def _fit_ref_to_target(
+    ref_id: str, ref_audio_path: Path, prompt_text: str, target_text: str,
+) -> tuple[Path, str, str]:
+    """For refs LONGER than ``_FIT_REF_NOCLIP_SEC`` only, clip ref audio +
+    prompt_text into the CV3 zero_shot sweet spot. Refs at or below that
+    threshold are returned untouched (short refs clip badly).
+
+    仅对长于 ``_FIT_REF_NOCLIP_SEC`` 的 ref 做裁剪，把音频 + prompt_text
+    同步截到 CV3 zero_shot 的"短锚"区间；阈值以内的 ref 整段原样返回
+    （裁短 ref 会切出残片，伤音色）。
+
+    Strategy:
+      1. Walk word_timestamps; accept word i if it brings us into
+         [MIN_CHARS, MAX_CHARS] AND its end time is in [MIN_SEC, MAX_SEC].
+      2. Prefer punctuation-ending words (sentence-complete) when possible.
+      3. If no in-range cut exists, fall back to first word whose end is
+         ≥ MIN_SEC (audio anchor matters more than text alignment for CV3).
+
+    Returns:
+        (audio_path_to_use, prompt_text_to_use, reason)
+        reason ∈ {"no_fit" — already short, "fitted:..." — clipped,
+                  "no_timestamps" — sidecar lacks alignment data}
+    """
+    # ``target_text`` is currently unused by the fit; kept in the signature
+    # because the policy of "scale to target" may come back if CV3 behaviour
+    # changes. For now CV3 wants the *same* short anchor regardless.
+    del target_text
+
+    if not ref_id.startswith("upload_"):
+        return ref_audio_path, prompt_text, "no_fit"
+    meta_path = UPLOADS_DIR / f"{ref_id}.json"
+    if not meta_path.exists():
+        return ref_audio_path, prompt_text, "no_fit"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    words = meta.get("word_timestamps") or []
+    if not words:
+        return ref_audio_path, prompt_text, "no_timestamps"
+
+    # Short enough — use the whole upload as-is. Only clip refs longer than
+    # the no-clip threshold (clipping short refs produced bad fragments).
+    # 够短就整段用；只有超过 no-clip 阈值的 ref 才裁（裁短 ref 反而出残片）。
+    duration = float(meta.get("duration") or 0.0)
+    if duration and duration <= _FIT_REF_NOCLIP_SEC:
+        return ref_audio_path, prompt_text, "no_fit"
+
+    # Walk words. Track: best in-range cut (preferred), and fallback by-time.
+    # 优先选"在字数+时长双区间内、且以标点结尾"的切点；否则任何在区间内的；
+    # 都不行就只按时长找一个 ≥ 3 秒的回退点。
+    acc_chars = 0
+    best: tuple[int, float, str] | None = None        # (cut_idx, end_s, text)
+    sentence_end: tuple[int, float, str] | None = None
+    audio_floor: tuple[int, float, str] | None = None
+
+    for i, w in enumerate(words):
+        acc_chars += len(w["word"])
+        end_s = float(w["end"])
+        text_so_far = "".join(x["word"] for x in words[: i + 1]).strip()
+
+        in_text_range = _FIT_TEXT_MIN_CHARS <= acc_chars <= _FIT_TEXT_MAX_CHARS
+        in_audio_range = _FIT_AUDIO_MIN_SEC <= end_s <= _FIT_AUDIO_MAX_SEC
+        if in_text_range and in_audio_range:
+            best = (i, end_s, text_so_far)
+            if w["word"].endswith(("。", ".", "！", "!", "？", "?", "，", ",")):
+                sentence_end = best
+                break  # ideal cut found
+
+        if audio_floor is None and end_s >= _FIT_AUDIO_MIN_SEC:
+            audio_floor = (i, end_s, text_so_far)
+
+        if end_s > _FIT_AUDIO_MAX_SEC and best is not None:
+            break  # walked past sweet spot
+
+    chosen = sentence_end or best or audio_floor
+    if chosen is None:
+        return ref_audio_path, prompt_text, "no_fit_short_audio"
+    cut_idx, cut_end_s, fitted_text = chosen
+
+    out_audio = UPLOADS_DIR / f"{ref_id}__fit{cut_idx + 1}.wav"
+    if not out_audio.exists():
+        import soundfile as sf
+        data, sr = sf.read(str(ref_audio_path))
+        n = int(cut_end_s * sr)
+        sf.write(str(out_audio), data[:n], sr)
+
+    reason = "fitted_sentence" if sentence_end else ("fitted_in_range" if best else "fitted_audio_floor")
+    return out_audio, fitted_text, f"{reason}:{cut_idx + 1}/{len(words)}words@{cut_end_s:.2f}s_{len(fitted_text)}chars"
+
+
 def _iter_builtin_refs():
     """Yield ``RefAudio`` entries for every chunk in datasets/.
 
@@ -331,6 +440,11 @@ async def upload_ref(
     except Exception as e:  # noqa: BLE001 — duration is best-effort metadata
         logger.warning("failed to read duration of %s: %s", audio_path, e)
 
+    # Word-level timestamps power synthesis-time _fit_ref_to_target.
+    # Always Whisper, regardless of lang routing — FunASR doesn't expose words.
+    # 词时间戳供合成时同步截 ref 用；不论语种都走 Whisper。
+    word_ts = _whisper_word_timestamps(app, audio_path, asr_lang)
+
     meta_path = UPLOADS_DIR / f"{ref_id}.json"
     meta = {
         "ref_id": ref_id,
@@ -339,6 +453,7 @@ async def upload_ref(
         "duration": duration,
         "asr_lang": asr_lang,
         "asr_confidence": asr_conf,
+        "word_timestamps": word_ts,
         "uploaded_at": _now_utc_iso(),
     }
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -668,6 +783,13 @@ async def _bilibili_import_task(
         except Exception as e:  # noqa: BLE001 — best-effort metadata
             logger.warning("bilibili import: failed to read duration: %s", e)
 
+        # Word-level timestamps for _fit_ref_to_target. Always Whisper —
+        # FunASR (default zh route) doesn't expose word boundaries.
+        # 词时间戳：不论字幕还是 ASR 路径都补一次 Whisper 拿对齐用。
+        word_ts = await asyncio.to_thread(
+            _whisper_word_timestamps, app, canonical_audio, asr_lang,
+        )
+
         meta = {
             "ref_id": ref_id,
             "audio_path": str(canonical_audio),
@@ -675,6 +797,7 @@ async def _bilibili_import_task(
             "duration": duration,
             "asr_lang": asr_lang,
             "asr_confidence": asr_conf,
+            "word_timestamps": word_ts,
             "uploaded_at": _now_utc_iso(),
             "source": "bilibili",
             "bilibili": {
@@ -948,6 +1071,24 @@ def _get_or_init_transcriber(app: FastAPI):
     return app.state.transcriber
 
 
+def _whisper_word_timestamps(app: FastAPI, audio_path: Path, lang: str | None):
+    """Return word-level timestamps for ``audio_path``.
+
+    返回词级时间戳列表 ``[{"word", "start", "end"}, ...]``。中文路径下
+    Transcriber 走 FunASR，没有时间戳；这里直接调底层 Whisper backend
+    取时间戳（Whisper 中文转写质量略逊 FunASR 但够用作对齐）。
+
+    Best-effort: any failure returns ``None`` so import doesn't break.
+    """
+    try:
+        transcriber = _get_or_init_transcriber(app)
+        result = transcriber.whisper.transcribe(audio_path, language=lang)
+        return result.word_timestamps
+    except Exception as e:  # noqa: BLE001 — timestamps are optional metadata
+        logger.warning("word_timestamps failed for %s: %s", audio_path, e)
+        return None
+
+
 def _run_eval_blocking(
     syn_wav: Path, ref_wav: Path, target_text: str, transcriber,
 ) -> dict:
@@ -1034,6 +1175,20 @@ async def synthesize(req: SynthesizeRequest):
             detail=f"ref audio file missing on disk: {ref_audio_path}",
         )
 
+    # CV3 long-text drift mitigation. Truncate ref AUDIO + prompt_text together
+    # using word-level timestamps so the [audio | text] pair stays consistent.
+    # Text-only truncation breaks zero_shot (audio claims more than text says).
+    # 2026-06-02 验证：单截 text 会导致 audio/text 错位，输出乱码。必须同步截。
+    original_prompt_text = prompt_text
+    ref_audio_path, prompt_text, fit_reason = _fit_ref_to_target(
+        req.ref_id, ref_audio_path, prompt_text, req.text,
+    )
+    if fit_reason != "no_fit":
+        logger.info(
+            "ref fitted to target (ref=%s, target_len=%d): %s",
+            req.ref_id, len(req.text), fit_reason,
+        )
+
     composed = None
     if req.mode == "instruct":
         composed = compose_instruct(req.voice_config)  # type: ignore[arg-type]
@@ -1069,6 +1224,8 @@ async def synthesize(req: SynthesizeRequest):
         "ref_id": req.ref_id,
         "ref_audio_path": str(ref_audio_path),
         "prompt_text": prompt_text,
+        "prompt_text_original": original_prompt_text,
+        "ref_fit": fit_reason,
         "mode": req.mode,
         "voice_config": req.voice_config.model_dump() if req.voice_config else None,
         "composed_instruct": composed,

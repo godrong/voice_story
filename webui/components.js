@@ -264,6 +264,7 @@ export const SourceTabs = defineComponent({
     const tabs = [
       { key: "bilibili", label: "B站 URL" },
       { key: "youtube",  label: "YouTube" },
+      { key: "record",   label: "🎙 录音" },
       { key: "upload",   label: "Upload" },
       { key: "uploaded", label: "Uploaded" },
       { key: "builtin",  label: "Built-in" },
@@ -429,6 +430,161 @@ export const VoiceSourcePanel = defineComponent({
       e.target.value = "";
     };
 
+    // --- mic recording ---
+    // 用 MediaRecorder 抓 webm/opus，停止后用 AudioContext 解码 → 重编 WAV，
+    // 复用 upload 通路（后端只要 wav/mp3 即可）。
+    const REC_MAX_S = 60;  // 自动 stop 上限
+    const recState = ref("idle");  // idle | requesting | recording | stopping | preview | error
+    const recError = ref("");
+    const recElapsedS = ref(0);
+    const recPreviewUrl = ref("");
+    const recPreviewBytes = ref(0);
+    let mediaRecorder = null;
+    let recordedChunks = [];
+    let recordedBlob = null;        // raw webm blob from MediaRecorder
+    let recordedWavBlob = null;     // re-encoded wav blob (uploaded)
+    let micStream = null;
+    let recTimer = null;
+    let recStart0 = 0;
+
+    function _stopMic() {
+      if (recTimer) { clearInterval(recTimer); recTimer = null; }
+      if (micStream) {
+        micStream.getTracks().forEach(t => t.stop());
+        micStream = null;
+      }
+    }
+
+    function _resetRec() {
+      _stopMic();
+      mediaRecorder = null;
+      recordedChunks = [];
+      recordedBlob = null;
+      recordedWavBlob = null;
+      if (recPreviewUrl.value) URL.revokeObjectURL(recPreviewUrl.value);
+      recPreviewUrl.value = "";
+      recPreviewBytes.value = 0;
+      recElapsedS.value = 0;
+      recError.value = "";
+    }
+
+    async function onRecStart() {
+      _resetRec();
+      recState.value = "requesting";
+      try {
+        micStream = await navigator.mediaDevices.getUserMedia({
+          audio: { channelCount: 1, sampleRate: 48000, echoCancellation: true, noiseSuppression: true },
+        });
+      } catch (e) {
+        recState.value = "error";
+        recError.value = `麦克风权限被拒：${e.message || e.name}`;
+        return;
+      }
+      const mimeTypes = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", ""];
+      const mt = mimeTypes.find(t => !t || MediaRecorder.isTypeSupported(t)) || "";
+      mediaRecorder = new MediaRecorder(micStream, mt ? { mimeType: mt } : undefined);
+      mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) recordedChunks.push(e.data); };
+      mediaRecorder.onstop = onRecStopped;
+      mediaRecorder.start();
+      recState.value = "recording";
+      recStart0 = Date.now();
+      recElapsedS.value = 0;
+      recTimer = setInterval(() => {
+        recElapsedS.value = (Date.now() - recStart0) / 1000;
+        if (recElapsedS.value >= REC_MAX_S) onRecStop();
+      }, 100);
+    }
+
+    function onRecStop() {
+      if (!mediaRecorder || mediaRecorder.state === "inactive") return;
+      recState.value = "stopping";
+      mediaRecorder.stop();
+    }
+
+    async function onRecStopped() {
+      _stopMic();
+      const mt = mediaRecorder?.mimeType || "audio/webm";
+      recordedBlob = new Blob(recordedChunks, { type: mt });
+      try {
+        recordedWavBlob = await _blobToWav(recordedBlob);
+      } catch (e) {
+        recState.value = "error";
+        recError.value = `编码 WAV 失败：${e.message || e}`;
+        return;
+      }
+      recPreviewUrl.value = URL.createObjectURL(recordedWavBlob);
+      recPreviewBytes.value = recordedWavBlob.size;
+      recState.value = "preview";
+    }
+
+    function onRecUse() {
+      if (!recordedWavBlob) return;
+      // file name lines up with the upload tab — uploaded sidecar will key
+      // off mime/extension on the server side.
+      // 文件名与 Upload tab 风格保持一致；后端按 mime/ext 落 sidecar。
+      const stamp = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
+      const file = new File([recordedWavBlob], `mic_${stamp}.wav`, { type: "audio/wav" });
+      emit("upload", file);
+      _resetRec();
+      recState.value = "idle";
+    }
+
+    // --- WAV encoder: decode webm/opus via AudioContext → PCM16 LE → RIFF ---
+    // 浏览器内把任意 codec 的录音重编成 PCM16 WAV；后端 soundfile/faster-whisper
+    // 拿到 WAV 都能识别，避开 webm/opus 兼容性问题。
+    async function _blobToWav(blob) {
+      const ab = await blob.arrayBuffer();
+      const AC = window.AudioContext || window.webkitAudioContext;
+      const ctx = new AC();
+      const buf = await ctx.decodeAudioData(ab.slice(0));
+      const sampleRate = buf.sampleRate;
+      const ch = buf.numberOfChannels;
+      // Down-mix to mono if needed (cloning rarely benefits from stereo).
+      // 多声道降到 mono；克隆基本只用得到 mono。
+      const samples = buf.length;
+      const mono = new Float32Array(samples);
+      for (let c = 0; c < ch; c++) {
+        const data = buf.getChannelData(c);
+        for (let i = 0; i < samples; i++) mono[i] += data[i] / ch;
+      }
+      const wavBytes = _floatToWav(mono, sampleRate);
+      await ctx.close();
+      return new Blob([wavBytes], { type: "audio/wav" });
+    }
+
+    function _floatToWav(samples, sampleRate) {
+      const len = samples.length;
+      const buf = new ArrayBuffer(44 + len * 2);
+      const v = new DataView(buf);
+      const writeString = (off, s) => { for (let i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i)); };
+      // RIFF header
+      writeString(0, "RIFF");
+      v.setUint32(4, 36 + len * 2, true);
+      writeString(8, "WAVE");
+      // fmt chunk
+      writeString(12, "fmt ");
+      v.setUint32(16, 16, true);        // PCM chunk size
+      v.setUint16(20, 1, true);         // format = PCM
+      v.setUint16(22, 1, true);         // channels = mono
+      v.setUint32(24, sampleRate, true);
+      v.setUint32(28, sampleRate * 2, true);  // byte rate
+      v.setUint16(32, 2, true);         // block align
+      v.setUint16(34, 16, true);        // bits per sample
+      // data chunk
+      writeString(36, "data");
+      v.setUint32(40, len * 2, true);
+      // PCM samples
+      let off = 44;
+      for (let i = 0; i < len; i++) {
+        const s = Math.max(-1, Math.min(1, samples[i]));
+        v.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+        off += 2;
+      }
+      return new Uint8Array(buf);
+    }
+
+    onUnmounted(() => _resetRec());
+
     const onProbe = () => {
       if (!bvUrl.value.trim()) return;
       emit("bilibili-probe", bvUrl.value.trim());
@@ -469,6 +625,11 @@ export const VoiceSourcePanel = defineComponent({
       onFile, onProbe, onBiliImport, onYtExtract,
       uploadedRefs, uploadedCount, builtinRefs, selectedRef,
       onPick: (refId) => emit("update:selectedRefId", refId),
+      // mic recording state + actions
+      recState, recError, recElapsedS, recPreviewUrl, recPreviewBytes,
+      onRecStart, onRecStop, onRecUse,
+      onRecRedo: () => { _resetRec(); recState.value = "idle"; },
+      REC_MAX_S,
     };
   },
   template: `
@@ -555,6 +716,75 @@ export const VoiceSourcePanel = defineComponent({
         <div class="field-hint" style="margin-top:6px;">
           YouTube extraction goes through the full ingest pipeline (Demucs → VAD → ASR → manifest).
           Watch Zone 2 for live progress.
+        </div>
+      </template>
+
+      <!-- Record tab — capture mic via getUserMedia + MediaRecorder, re-encode to WAV -->
+      <template v-if="activeTab === 'record'">
+        <div class="field-hint" style="margin-bottom: 10px;">
+          直接用电脑麦克风录一段干净的 5–30 秒语音作为参考。
+          自动停止上限 {{ REC_MAX_S }}s。
+        </div>
+
+        <!-- idle: big start button -->
+        <div v-if="recState === 'idle'" style="display:flex; align-items:center; gap:12px;">
+          <button class="btn-primary" @click="onRecStart">
+            ● 开始录音
+          </button>
+          <span class="field-hint" style="margin:0;">需要授予浏览器麦克风权限</span>
+        </div>
+
+        <!-- requesting permission -->
+        <div v-if="recState === 'requesting'" class="field-hint">
+          正在请求麦克风权限…
+        </div>
+
+        <!-- recording: red pulse + timer + stop -->
+        <div v-if="recState === 'recording'"
+             style="display:flex; align-items:center; gap:14px; padding:10px;
+                    background: var(--bg-elev); border-radius:8px; border: 1px solid var(--state-error);">
+          <span style="width:14px; height:14px; border-radius:50%; background: var(--state-error);
+                       animation: pulse 1.1s ease-in-out infinite;"></span>
+          <span style="font-family: var(--font-mono); font-size: 14px;">
+            录音中 · {{ recElapsedS.toFixed(1) }}s
+            <span class="field-hint" style="margin-left:8px;">(自动停 {{ REC_MAX_S }}s)</span>
+          </span>
+          <button class="btn-primary" style="margin-left:auto; background: var(--state-error); border-color: var(--state-error);"
+                  @click="onRecStop">
+            ■ 停止
+          </button>
+        </div>
+
+        <!-- stopping: re-encoding to WAV -->
+        <div v-if="recState === 'stopping'" class="field-hint">
+          停止录音 · 转 WAV 中…
+        </div>
+
+        <!-- preview: audio + use/redo -->
+        <div v-if="recState === 'preview'"
+             style="padding:10px; background: var(--bg-elev); border-radius:8px; border: 1px solid var(--border);">
+          <div class="field-hint" style="margin-bottom: 8px;">
+            录音预览 · {{ recElapsedS.toFixed(1) }}s · {{ (recPreviewBytes/1024).toFixed(0) }} KB (WAV)
+          </div>
+          <audio controls :src="recPreviewUrl" style="width:100%; margin-bottom:10px;"></audio>
+          <div style="display:flex; gap:8px;">
+            <button class="btn-primary" @click="onRecUse">
+              使用这段录音 → 参考
+            </button>
+            <button class="btn-primary"
+                    style="background: var(--bg); border-color: var(--border); color: var(--fg);"
+                    @click="onRecRedo">
+              重录
+            </button>
+          </div>
+        </div>
+
+        <!-- error -->
+        <div v-if="recState === 'error'" class="field-hint" style="color: var(--state-error);">
+          {{ recError }}
+          <button class="btn-primary"
+                  style="background: var(--bg); border-color: var(--border); color: var(--fg); margin-top:8px;"
+                  @click="onRecRedo">重试</button>
         </div>
       </template>
 
@@ -670,6 +900,51 @@ export const SynthesisPanel = defineComponent({
     // 单字段事件——parent 原地 config.k = v，保持 reactive 对象 identity。
     const setCfg = (k, v) => emit("set-config-field", { key: k, value: v });
 
+    // --- Paralinguistic token insertion ---
+    // CV3 supports inline atom tokens (e.g. [breath]) and wrap tokens
+    // (e.g. <strong>...</strong>, <laughter>...</laughter>). Atom inserts at
+    // cursor; wrap surrounds selection (or inserts tag pair empty).
+    // 副语言 token 插入：原子型直接插光标处，包裹型环绕选区或插空标签对。
+    // Source of token names: RESEARCH.md §维度 4 副语言元素.
+    const TOKEN_CHIPS = [
+      { kind: "atom", token: "[breath]",        label: "呼吸"  },
+      { kind: "atom", token: "[quick_breath]",  label: "短促呼吸" },
+      { kind: "atom", token: "[laughter]",      label: "笑声"  },
+      { kind: "atom", token: "[sigh]",          label: "叹气"  },
+      { kind: "atom", token: "[cough]",         label: "咳嗽"  },
+      { kind: "atom", token: "[mn]",            label: "嗯"   },
+      { kind: "atom", token: "[lipsmack]",      label: "咂嘴"  },
+      { kind: "wrap", open: "<strong>",   close: "</strong>",   label: "强调…"   },
+      { kind: "wrap", open: "<laughter>", close: "</laughter>", label: "笑着说…" },
+    ];
+    const textareaRef = ref(null);
+
+    function insertToken(chip) {
+      const ta = textareaRef.value;
+      const txt = props.text || "";
+      const ss = ta ? ta.selectionStart : txt.length;
+      const se = ta ? ta.selectionEnd   : txt.length;
+      let next, caret;
+      if (chip.kind === "atom") {
+        next = txt.slice(0, ss) + chip.token + txt.slice(se);
+        caret = ss + chip.token.length;
+      } else {
+        // wrap: surround selection (or insert empty pair + drop cursor inside)
+        // wrap：环绕选区；无选区时插空标签对、光标停在中间方便接着打字
+        const sel = txt.slice(ss, se);
+        next = txt.slice(0, ss) + chip.open + sel + chip.close + txt.slice(se);
+        caret = ss + chip.open.length + sel.length;
+      }
+      emit("update:text", next);
+      // Restore focus + caret after Vue re-render flushes the new value.
+      // 等 Vue flush 完 DOM 再恢复光标，否则 selectionStart 会被重置到末尾。
+      setTimeout(() => {
+        if (!textareaRef.value) return;
+        textareaRef.value.focus();
+        textareaRef.value.setSelectionRange(caret, caret);
+      }, 0);
+    }
+
     const evalDot = computed(() => {
       const e = props.evalStatus;
       if (e === "done") return "ok";
@@ -692,7 +967,10 @@ export const SynthesisPanel = defineComponent({
     });
     const canRun = computed(() => !disabledReason.value);
 
-    return { onText, onMode, setCfg, evalDot, disabledReason, canRun };
+    return {
+      onText, onMode, setCfg, evalDot, disabledReason, canRun,
+      TOKEN_CHIPS, insertToken, textareaRef,
+    };
   },
   template: `
     <section class="zone zone-full">
@@ -701,7 +979,19 @@ export const SynthesisPanel = defineComponent({
         <div>
           <div class="field">
             <label class="field-label">Target text</label>
-            <textarea class="textarea textarea-tall"
+            <!-- Paralinguistic token chips. Atom = insert at cursor;
+                 Wrap = surround selection (or empty tag pair).
+                 副语言 token 按钮条：原子插光标，包裹环绕选区。 -->
+            <div class="token-chips">
+              <button v-for="chip in TOKEN_CHIPS" :key="chip.token || chip.open"
+                      type="button" class="token-chip"
+                      :title="chip.kind === 'wrap' ? (chip.open + '...' + chip.close) : chip.token"
+                      @click="insertToken(chip)">
+                <span class="chip-label">{{ chip.label }}</span>
+                <span class="chip-token">{{ chip.kind === 'wrap' ? chip.open : chip.token }}</span>
+              </button>
+            </div>
+            <textarea class="textarea textarea-tall" ref="textareaRef"
                       :value="text" @input="onText"
                       placeholder="It's great to be back in Beijing, truly fantastic..."></textarea>
           </div>
@@ -715,60 +1005,34 @@ export const SynthesisPanel = defineComponent({
         </div>
 
         <div>
-          <div class="card-title" style="margin-bottom: 4px;">Voice config (instruct mode)</div>
-          <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
-            <div class="field">
-              <label class="field-label">Language</label>
-              <select class="select" :value="config.language"
-                      @change="e => setCfg('language', e.target.value)">
-                <option value="English">English</option>
-                <option value="Chinese">Chinese</option>
-              </select>
-            </div>
-            <div class="field">
-              <label class="field-label">Gender</label>
-              <select class="select" :value="config.gender || ''"
-                      @change="e => setCfg('gender', e.target.value || null)">
-                <option value="">—</option>
-                <option value="male">male</option>
-                <option value="female">female</option>
-              </select>
-            </div>
-            <div class="field">
-              <label class="field-label">Age</label>
-              <select class="select" :value="config.age || ''"
-                      @change="e => setCfg('age', e.target.value || null)">
-                <option value="">—</option>
-                <option value="young">young</option>
-                <option value="middle">middle</option>
-                <option value="old">old</option>
-              </select>
-            </div>
-            <div class="field">
-              <label class="field-label">Quality</label>
-              <select class="select" :value="config.quality || ''"
-                      @change="e => setCfg('quality', e.target.value || null)">
-                <option value="">—</option>
-                <option value="studio">studio</option>
-                <option value="broadcast">broadcast</option>
-                <option value="casual">casual</option>
-              </select>
-            </div>
+          <div class="card-title" style="margin-bottom: 4px;">Voice config (instruct 模式)</div>
+          <div class="field-hint" style="margin-bottom: 8px;">
+            只控制「怎么说」——音色 / 性别 / 年龄由参考音频决定，无法也无需在此设置。
           </div>
           <div class="field">
-            <label class="field-label">Persona / Emotion / Description (free text)</label>
+            <label class="field-label">风格 Quality</label>
+            <select class="select" :value="config.quality || ''"
+                    @change="e => setCfg('quality', e.target.value || null)">
+              <option value="">—</option>
+              <option value="studio">studio · 音质干净清晰</option>
+              <option value="broadcast">broadcast · 带专业播音腔</option>
+              <option value="casual">casual · 语气轻松随意</option>
+            </select>
+          </div>
+          <div class="field">
+            <label class="field-label">口吻 / 情绪 / 补充描述（自由文本）</label>
             <input class="select" :value="config.persona"
                    @input="e => setCfg('persona', e.target.value)"
-                   placeholder="persona: e.g. 'confident teacher'" />
+                   placeholder="口吻：如 知心朋友、讲故事的人、新闻主播" />
             <input class="select" style="margin-top:6px;" :value="config.emotion"
                    @input="e => setCfg('emotion', e.target.value)"
-                   placeholder="emotion: e.g. 'calm, warm'" />
+                   placeholder="情绪：如 平静温暖、激动、低沉" />
             <input class="select" style="margin-top:6px;" :value="config.description"
                    @input="e => setCfg('description', e.target.value)"
-                   placeholder="description: 1-2 sentences on timbre / pacing / delivery" />
+                   placeholder="补充：如 语速放慢，像在哄睡（完整中文句子）" />
           </div>
           <div v-if="mode === 'instruct' && composed" class="field-hint" style="margin-top:4px;">
-            <code style="color: var(--accent-voice);">{{ composed }}</code>
+            实际指令：<code style="color: var(--accent-voice);">{{ composed }}</code>
           </div>
         </div>
       </div>

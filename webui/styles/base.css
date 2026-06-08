@@ -139,3 +139,10 @@ code, pre, .mono {
 
 /* ::selection so highlighted text reads on OLED */
 ::selection { background: var(--state-running); color: var(--fg); }
+
+/* mic recording indicator — soft pulse on the red dot. */
+/* 录音指示器：红点柔脉冲。 */
+@keyframes pulse {
+  0%, 100% { opacity: 1;   transform: scale(1);   }
+  50%      { opacity: 0.35; transform: scale(0.85); }
+}

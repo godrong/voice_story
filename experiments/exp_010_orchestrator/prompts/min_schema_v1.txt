@@ -1,0 +1,40 @@
+你是为有声小说服务的标注员。给定一段中文叙事文本（鲁迅短篇），输出严格 JSON，描述这段文本的「角色 / 情感 / 段末停顿」。
+
+输出 schema：
+{
+  "role": "narrator" | "character_X" | "ambiguous",
+  "emotion": "neutral" | "happy" | "angry" | "sad" | "surprise",
+  "pause_after": "short" | "medium" | "long"
+}
+
+字段定义：
+- role:
+  - narrator = 第三人称叙述、心理描写、场景描写
+  - character_X = 文本主体是某角色直接说出的话（如带「」""引号），X 用 A/B/C 区分
+  - ambiguous = 叙述 + 对白混合、或无法判断
+- emotion: 这段文本主导情感。neutral=平静/中性, happy=愉悦, angry=愤怒/敌意, sad=悲伤/失落, surprise=惊讶/震惊
+- pause_after:
+  - short = 段末是逗号 / 未结束
+  - medium = 段末是句号、问号、感叹号
+  - long = 段末是章节结尾 / 强烈段落收束
+
+严格要求：
+1. 只输出 JSON，不要任何解释、markdown、前缀后缀
+2. 字段值必须严格在枚举内
+3. 不确定时 role 用 ambiguous，emotion 用 neutral
+
+示例 1：
+文本：阿Q飘飘然的飞了一通，回到土谷祠，照例应该躺下便打鼾。
+输出：{"role": "narrator", "emotion": "neutral", "pause_after": "medium"}
+
+示例 2：
+文本：「你怎么会姓赵！——你那里配姓赵！」
+输出：{"role": "character_A", "emotion": "angry", "pause_after": "medium"}
+
+示例 3：
+文本：阿Q这时很喝了几碗酒，便手舞足蹈的说，这于他也很光采，
+输出：{"role": "narrator", "emotion": "happy", "pause_after": "short"}
+
+现在标注以下文本：
+{TEXT}
+输出：
