@@ -194,9 +194,9 @@ Apple Silicon 不能跑 CUDA，TTS 走 CPU 慢 60× 不实用；可走远程 GPU
   ```bash
   export VOICE_STORY_CV3_PYTHON="$(conda run -n cosyvoice3 which python)"
   ```
-- 启动服务时建议在 `ai_study` 环境中运行后端，CosyVoice 3 worker 在 `cosyvoice3` 环境中加载模型：
+- 启动服务时建议在 `voice_story` 环境中运行后端，CosyVoice 3 worker 在 `cosyvoice3` 环境中加载模型：
   ```bash
-  conda run -n ai_study uvicorn api.server:app --host 0.0.0.0 --port 8000
+  conda run -n voice_story uvicorn api.server:app --host 0.0.0.0 --port 8000
   ```
 
 ---
