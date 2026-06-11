@@ -199,14 +199,67 @@ LLM Agent 预处理路径（§5）需要一个 orchestrator 标注 chunk 的 rol
 
 ---
 
-## 7. 未解决问题
+## 7. exp_011: 长文本崩溃根因定位（脚本就绪，待 GPU）
 
-1. **长文本根因**：训练偏差 vs 注意力漂移 vs token budget — 需 attention 分析
-2. **跨情感 zero-shot**：Angry ref → Sad text，情感是否可迁移？
-3. **Token 位置效应**：句首/中/尾是否有不同效果？
-4. **3B prompt 工程上限**：本实验用 few-shot；CoT / structured decoding / 更密集 demonstrations 能否让 3B 跳出 collapse？
+### 流水线定位
 
-## 8. 方法论教训
+```
+文本 →①Tokenizer→ token ID →②LLM(Qwen2-0.5B,自回归)→ speech token →③Flow+HiFiGAN→ 声音
+                                    ▲ 崩溃发生在这里（CER 崩=LLM 生成了错误的 speech token）
+```
+
+声码器只是忠实渲染"声音的拼音"，根因必在 ② LLM。P3 数据：CER 在 200 字拐点（0.12）后 800 字崩溃（0.92）——恰与 CV3 训练截断 `token_max_length=200` 重合，但相关≠因果，需实验分离。
+
+### 四个候选假说
+
+| 假说 | 机制（类比） | 病根 | 若成立的修法 |
+|------|------|------|------|
+| **A: RoPE 外推失败** | 位置编码像钟表指针，训练只见过 ≤200 字对应的旋转角度，超出后进入"没训练过的角度区"，模型对 token 间距判断失准 | 绝对位置超训练范围 | RoPE 插值 / NTK-aware scaling（免重训） |
+| **B: Attention 稀释** | 历史 token 太多，softmax 权重被稀释成"均匀糊状"，关键信息（该读哪个字）被淹没 | 上下文信噪比下降 | 滑动窗口 attention / 分段重锚 |
+| **C: Token budget 截断** | `max_len = text_len × 20` 推理上限提前终止生成 | 推理参数硬上限 | 改 max_token_text_ratio |
+| **D: 自回归误差累积** | fp16 下数百步生成，每步微小误差像复利一样滚大 | 数值/分布漂移 | fp32 推理 / 周期性重置 |
+
+### 区分实验（核心 trick：解耦"绝对位置"与"内容长度"）
+
+CV3 LLM 输入序列 = `[system+ref文本][ref speech token][target文本][逐步生成的 speech token...]`
+→ 生成部分的**绝对位置** = 前缀总长 + 当前步数。**加长 ref 前缀即可推高 target 的绝对位置，而不改变 target 自身的内容长度和生成步数。**
+
+**实验 1 — 位置对照（区分 A vs B/D）**：
+| 条件 | ref 前缀 | target | 生成段绝对位置 | 预期 |
+|------|---------|--------|:--:|------|
+| C1 baseline | 短 ref (~3s) | 150 字 | ~低 | 好（基线） |
+| C2 high-pos | 长 ref（同说话人拼接 ~20s+） | **同样 150 字** | ~高（≈C3 水平） | ？ |
+| C3 long-target | 短 ref | 800 字 | ~高 | 崩（P3 已证） |
+
+**判读**：C2 崩 ≈ C3 → 位置是元凶（**假说 A**）；C2 好 ≈ C1 → 位置无辜，是步数/内容长度（**假说 B/D**）。
+
+**实验 2 — Attention/熵探针（坐实 B vs D）**：
+- Hook LLM attention 层，对比 200 字（正常）vs 800 字（崩溃）的中间量
+- **A 指纹**：崩溃段 attention 撒向无关远处位置（位置感丢失）
+- **B 指纹**：attention 熵升高、分布变平（信息过载，无尖锐焦点）
+- **D 指纹**：attention 正常但输出 logits 熵随步数单调爬升（越生成越不确定）
+- 技术注意：Qwen2 默认 sdpa 不返回权重，需 `attn_implementation="eager"` 或 hook 自算 QK
+
+**实验 3 — budget 排除（排除 C，一行检查）**：
+- 崩溃样本的生成 token 数是否触顶 `text_len × 20`？P3 数据显示 800 字时音频时长仍在涨（69s→165s），初步排除 C，脚本中顺带验证。
+
+### 修法-假说映射（实验结果直接决定工程路线）
+
+- A 成立 → RoPE 插值，**CV3 长文本上限可能直接翻倍**，Agent 切分粒度可放宽
+- B 成立 → 切分是唯一解，Agent 方案地位上升；可试滑窗 attention
+- D 成立 → 段间重锚（每 N 字重新注入 ref）即可缓解
+
+详见 `experiments/exp_011_longtext_rootcause/`。
+
+---
+
+## 8. 未解决问题
+
+1. **跨情感 zero-shot**：Angry ref → Sad text，情感是否可迁移？
+2. **Token 位置效应**：副语言 token 在句首/中/尾是否有不同效果？
+3. **3B prompt 工程上限**：exp_010 用 few-shot；CoT / structured decoding 能否让 3B 跳出 collapse？
+
+## 9. 方法论教训
 
 1. `<|endofprompt|>` token 位置错误导致 2 天无效实验。此后所有代码先对比官方 example。详见 memory `feedback_check_official_first`。
 2. **Pilot 必须先在小样本（3-10）验证全链路**，再扩到目标量级。exp_010 因此发现 1.5B 塌缩问题只花了 5 分钟，避免标 500 段后才发现。
