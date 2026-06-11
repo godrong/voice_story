@@ -136,3 +136,28 @@
   4. 新发现：speech-token LM 对局部位置几何的敏感度远超文本 LLM（40ms 粒度时序编码在 RoPE 高频维度）
 - **方法论**：副作用对照(R1_s2) + 金丝雀(R1_s8) 双保险设计避免了错误结论入库
 - **备注**：westb 代理满载时同样拒绝 SSH（非 westc 特有），长超时(60s)可穿透
+
+---
+
+## exp_011d — NTK 频率选择性缩放（A vs B 最终裁决）
+
+- **日期**：2026-06-12
+- **脚本**：`experiments/exp_011_longtext_rootcause/exp4_ntk_scaling.py`
+- **机器**：4090D（PID 2626，nohup）
+- **方法**：重写 LLM rotary 的 inv_freq：`×s^(-2j/(d-2))`（秒针不动、时针慢 s 倍）；ENGAGED 日志验证 inv_freq[0] ratio=1.0、inv_freq[-1] ratio=1/s
+- **结果**：`results/exp011/exp4_ntk_results.json` + 试听 `listen_R16_ntk_recovered.wav`
+- **发现**：
+  1. **门控通过**：R1_n2=0.006, R1_n4=0.003（朴素 PI 同位 0.905）→ 仪器无毒
+  2. **R16 恢复 70%**（0.701→0.213），ASR 从"中间开始读"恢复为"从开头正确朗读"
+  3. R24 极端组恢复 39%（0.989→0.606）→ A 主导 + B/scale不足的残差
+  4. **假说 A（RoPE 距离 OOD）实锤为主因**；免训练 3 行代码可扩展 CV3 上下文
+- **下一步**：exp_011e 用真实 800 字 target + NTK 验证产品价值
+
+## A/B 裁决双实验对照（方法论记录）
+
+| | exp_011c 朴素 PI | exp_011d NTK |
+|--|:--:|:--:|
+| 干预 | position_ids ÷ s（全频压缩） | inv_freq 选择性缩放（保高频） |
+| 门控 R1+scale | **0.905 毒** | **0.006 净** |
+| 裁决资格 | ✗ 无效（自动判读被人工否决） | ✓ 有效 |
+| 结论 | — | A 实锤，恢复 70% |
