@@ -119,3 +119,20 @@
   4. ASR 证据链：R8tok 开头对后面飘 → R16tok 从中间开始读 → R24tok 完全乱语
 - **工程规则**：25×ref秒 + 字数×6 ≤ 1000；3s ref 时安全上限 ≈150 字
 - **备注**：westc 代理在合成期间拒绝 SSH（5/30 同款），nohup+落盘日志方案有效
+
+---
+
+## exp_011c — RoPE 位置插值干预（A vs B 裁决尝试）
+
+- **日期**：2026-06-12
+- **脚本**：`experiments/exp_011_longtext_rootcause/exp3_rope_interpolation.py`
+- **机器**：4090D（westb:23421，4090 已无卡开机；CV3/ESD 数据已在，零迁移）
+- **设计**：monkeypatch LLM 内全部 RotaryEmbedding，position_ids ÷ scale；7 条件 × 3 种子
+- **结果**：`results/exp011/exp3_rope_results.json`
+- **发现**：
+  1. 干预机制验证成功：ENGAGED 日志 + 金丝雀 R1_s8 死亡（0.5s 乱语）
+  2. **副作用对照失败**：R1_s2（健康+2×压缩）CER=0.905 → 朴素 PI 对该模型是炸弹不是手术刀
+  3. **自动判读"B 实锤"被人工否决**——干预损伤淹没一切，A vs B 仍开放
+  4. 新发现：speech-token LM 对局部位置几何的敏感度远超文本 LLM（40ms 粒度时序编码在 RoPE 高频维度）
+- **方法论**：副作用对照(R1_s2) + 金丝雀(R1_s8) 双保险设计避免了错误结论入库
+- **备注**：westb 代理满载时同样拒绝 SSH（非 westc 特有），长超时(60s)可穿透
