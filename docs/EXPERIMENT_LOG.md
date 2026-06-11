@@ -101,3 +101,21 @@
 | 4090 #1 | RTX 4090 | 24GB | 05/28-05/30 | exp_002-007 合成 |
 | 4090D | RTX 4090D | 24GB | 05/30 下午 | P1 调试（失败, ONNX CPU） |
 | H800 | H800 PCIe | 80GB | 05/30 晚间 | P1-P3 完成, exp_006 eval |
+
+---
+
+## exp_011 — 长文本崩溃根因定位
+
+- **日期**：2026-06-11
+- **脚本**：`experiments/exp_011_longtext_rootcause/`（exp1 / exp1b / exp2）
+- **设计**：
+  - exp1/1b 位置扫描：target 固定 150 字，ref 前缀 115→2509 speech token（>30s 音频经 token 层拼接绕过 tokenizer 限制），15+12 合成
+  - exp2 探针：monkeypatch sdpa 记录每步 attention 熵/文本区质量/读稿指针/logits 熵，健康 vs 崩溃对比
+- **结果**：`results/exp011/`（exp1_results.json, exp1b_results.json, fingerprint_report.json, probe_curves.png）
+- **发现**：
+  1. **CER 是总序列长度的函数**：R16tok(kv 2570)=0.701 ≈ CRASH(kv 2560)=0.698，与长度构成无关
+  2. 无损区终于 ~920 kv，与训练分布上限（≤30s 音频+200 字文本 ≈ 900-1000）吻合
+  3. C(budget)/D(误差累积) 排除；A(位置 OOD) 确立；A-RoPE vs B-稀释细分待 exp_011c
+  4. ASR 证据链：R8tok 开头对后面飘 → R16tok 从中间开始读 → R24tok 完全乱语
+- **工程规则**：25×ref秒 + 字数×6 ≤ 1000；3s ref 时安全上限 ≈150 字
+- **备注**：westc 代理在合成期间拒绝 SSH（5/30 同款），nohup+落盘日志方案有效

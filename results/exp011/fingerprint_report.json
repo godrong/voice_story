@@ -1,0 +1,28 @@
+{
+  "HEALTHY": {
+    "CER": 0.0,
+    "n_steps": 786,
+    "attn_entropy_first_quarter": 3.242,
+    "attn_entropy_last_quarter": 3.671,
+    "attn_entropy_trend": 0.164,
+    "mass_text_first_quarter": 0.196,
+    "mass_text_last_quarter": 0.1713,
+    "cursor_advance_ratio": 0.182,
+    "logits_entropy_trend": -0.256,
+    "logits_entropy_first_quarter": 2.825,
+    "logits_entropy_last_quarter": 2.297
+  },
+  "CRASH": {
+    "CER": 0.7155,
+    "n_steps": 1656,
+    "attn_entropy_first_quarter": 3.992,
+    "attn_entropy_last_quarter": 4.752,
+    "attn_entropy_trend": 0.214,
+    "mass_text_first_quarter": 0.164,
+    "mass_text_last_quarter": 0.1703,
+    "cursor_advance_ratio": 0.291,
+    "logits_entropy_trend": -0.209,
+    "logits_entropy_first_quarter": 3.312,
+    "logits_entropy_last_quarter": 2.931
+  }
+}
