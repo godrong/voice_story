@@ -56,3 +56,7 @@ logs/
 runs/
 wandb/
 *.log
+
+# Interview / personal prep — not for public history.
+# 面试 / 个人总结类文档，不进 git。
+docs/INTERVIEW_*.md
